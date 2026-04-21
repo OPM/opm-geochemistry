@@ -1,30 +1,10 @@
 # -*- mode: cmake; tab-width: 2; indent-tabs-mode: t; truncate-lines: t; compile-command: "cmake -Wdev" -*-
 # vim: set filetype=cmake autoindent tabstop=2 shiftwidth=2 noexpandtab softtabstop=2 nowrap:
 
-# This file sets up five lists:
-# MAIN_SOURCE_FILES     List of compilation units which will be included in
-#                       the library. If it isn't on this list, it won't be
-#                       part of the library. Please try to keep it sorted to
-#                       maintain sanity.
-#
-# TEST_SOURCE_FILES     List of programs that will be run as unit tests.
-#
-# TEST_DATA_FILES       Files from the source three that should be made
-#                       available in the corresponding location in the build
-#                       tree in order to run tests there.
-#
-# EXAMPLE_SOURCE_FILES  Other programs that will be compiled as part of the
-#                       build, but which is not part of the library nor is
-#                       run as tests.
-#
-# PUBLIC_HEADER_FILES   List of public header files that should be
-#                       distributed together with the library. The source
-#                       files can of course include other files than these;
-#                       you should only add to this list if the *user* of
-#                       the library needs it.
-list (APPEND MAIN_SOURCE_FILES
-    opm/models/io/vtkgeochemistryparams.cpp
-    opm/simulators/geochemistry/OpmGeoChemInterface.cpp
+# This file separates the standalone geochemistry solver from the optional
+# OPM integration layer so both build paths can reuse the same source lists.
+
+set(GEOCHEM_CORE_SOURCE_FILES
     opm/simulators/geochemistry/GeoChemIF.cpp
     opm/simulators/geochemistry/StandaloneSolvers.cpp
     opm/simulators/geochemistry/Common/ChemGlobal.cpp
@@ -56,16 +36,18 @@ list (APPEND MAIN_SOURCE_FILES
     opm/simulators/geochemistry/Thermo/eps_JN.cpp
     opm/simulators/geochemistry/Thermo/hkf.cpp
     opm/simulators/geochemistry/Thermo/ions.cpp
+    opm/simulators/geochemistry/Thermo/ThermoTable.cpp
     opm/simulators/geochemistry/Thermo/thermodata.cpp
     opm/simulators/geochemistry/Thermo/water.cpp
     opm/simulators/geochemistry/Utility/HelpfulStringMethods.cpp
-    )
+)
 
-list(APPEND PUBLIC_HEADER_FILES
-    opm/models/io/vtkgeochemistrymodule.hpp
-    opm/models/io/vtkgeochemistryparams.hpp
-    opm/simulators/flow/FlowProblemGeochemistry.hpp
-    opm/simulators/geochemistry/OpmGeoChemInterface.hpp
+set(GEOCHEM_OPM_SOURCE_FILES
+    opm/models/io/vtkgeochemistryparams.cpp
+    opm/simulators/geochemistry/OpmGeoChemInterface.cpp
+)
+
+set(GEOCHEM_CORE_PUBLIC_HEADER_FILES
     opm/simulators/geochemistry/GeoChemIF.h
     opm/simulators/geochemistry/StandaloneSolvers.hpp
     opm/simulators/geochemistry/Common/ChemGlobal.h
@@ -110,6 +92,7 @@ list(APPEND PUBLIC_HEADER_FILES
     opm/simulators/geochemistry/Thermo/eps_JN.h
     opm/simulators/geochemistry/Thermo/hkf.h
     opm/simulators/geochemistry/Thermo/ions.h
+    opm/simulators/geochemistry/Thermo/ThermoTable.h
     opm/simulators/geochemistry/Thermo/thermodata.h
     opm/simulators/geochemistry/Thermo/water.h
     opm/simulators/geochemistry/Utility/HelperMacros.hpp
@@ -117,13 +100,25 @@ list(APPEND PUBLIC_HEADER_FILES
     opm/simulators/geochemistry/Utility/MiscUtilityFunctions.hpp
 )
 
-# list (APPEND EXAMPLE_SOURCE_FILES
-#   examples/GeoChemX.cpp
-# )
+set(GEOCHEM_OPM_PUBLIC_HEADER_FILES
+    opm/models/io/vtkgeochemistrymodule.hpp
+    opm/models/io/vtkgeochemistryparams.hpp
+    opm/simulators/flow/FlowProblemGeochemistry.hpp
+    opm/simulators/geochemistry/OpmGeoChemInterface.hpp
+)
 
-# programs listed here will not only be compiled, but also marked for
-# installation
-# list (APPEND PROGRAM_SOURCE_FILES
-#   examples/GeoChemX.cpp
-# )
+set(GEOCHEM_STANDALONE_EXAMPLE_SOURCE_FILES
+    examples/GeoChemX.cpp
+    examples/ThermoX.cpp
+)
 
+# OPM's build helpers still expect these legacy variables.
+set(MAIN_SOURCE_FILES
+    ${GEOCHEM_CORE_SOURCE_FILES}
+    ${GEOCHEM_OPM_SOURCE_FILES}
+)
+
+set(PUBLIC_HEADER_FILES
+    ${GEOCHEM_CORE_PUBLIC_HEADER_FILES}
+    ${GEOCHEM_OPM_PUBLIC_HEADER_FILES}
+)

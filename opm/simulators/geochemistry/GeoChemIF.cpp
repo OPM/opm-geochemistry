@@ -684,7 +684,8 @@ void CGeoChemIF::set_geochemical_database_modifications_from_json(const std::str
 
     // Read ADD_SPECIES file and add database keywords
     if (json_parsed.contains("ADD_SPECIES")) {
-        std::ifstream db_file(json_parsed["ADD_SPECIES"], std::ios::binary);
+        const auto add_species_file = json_parsed.at("ADD_SPECIES").get<std::string>();
+        std::ifstream db_file(add_species_file, std::ios::binary);
         if (db_file.is_open()) {
             geochemicalDatabaseReader_.read(db_file);
             for(const auto& keyword : GeochemicalDatabaseKeyword::ALL_DATABASE_KEYWORDS) {

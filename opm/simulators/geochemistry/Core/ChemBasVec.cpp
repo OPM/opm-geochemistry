@@ -1434,6 +1434,14 @@ void BasVec::update_logK([[maybe_unused]] hkf& HKF_EOS, double T)
         }
         logK_min[i] *= fact;
     }
+
+    const int pos_water_vapor = SM_mineral.get_row_index("H2O,g");
+    if (pos_water_vapor >= 0)
+    {
+        const double water_vapor_logK = HKF_EOS.waterVaporLogK(T, PhysicalConstants::standard_gas_pressure);
+        logK_min[pos_water_vapor] = water_vapor_logK;
+        SM_mineral.dG_TP_[pos_water_vapor] = dG_basis[pos_water_] + water_vapor_logK / fact;
+    }
     SM_mineral.update_logK_analytical(T);
 
     // Other species (ions, aqueous complexes, surface complexes, ...)
@@ -1459,7 +1467,7 @@ void BasVec::update_molar_volume_gases_equilibrium_phases()
 //    int pos = ICS_->SM_mineral_->
     int pos = ICS_->SM_mineral_->get_row_index("CO2,g");
     if(pos > -1)
-        ICS_->SM_mineral_->mol_volume_[pos] = PhysicalConstants::IdealGasConstant * PhysicalConstants::ambient_temperature / PhysicalConstants::atmospheric_pressure;
+        ICS_->SM_mineral_->mol_volume_[pos] = PhysicalConstants::IdealGasConstant * PhysicalConstants::ambient_temperature / PhysicalConstants::standard_gas_pressure;
 }
 
 void BasVec::set_temperature_for_equilibrium_reactions(hkf& HKF_EOS)
@@ -1627,7 +1635,7 @@ void BasVec::calculate_gas_phase_pressure()
         int pos = pos_gas_phase_[i];
         Pres_gas += POW10(ICS_->SM_mineral_->log_a_[pos]) / ICS_->SM_mineral_->fugacity_[pos];
     }
-    Pres_gas *= PhysicalConstants::atmospheric_pressure;
+    Pres_gas *= PhysicalConstants::standard_gas_pressure;
     Pres_[gFluidPhase::GAS] = Pres_[gFluidPhase::OIL] = Pres_[gFluidPhase::WATER] = Pres_gas;
 }
 

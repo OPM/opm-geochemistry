@@ -7,7 +7,7 @@ if(GENERATE_NEW_REFERENCE_RESULTS)
     target_link_libraries(
         GenRefResultsEQSOLVER
         PRIVATE
-        opmgeochemistry
+        ${GEOCHEM_TEST_LIBRARY_TARGET}
         EquilibriumTestCases
     )
 

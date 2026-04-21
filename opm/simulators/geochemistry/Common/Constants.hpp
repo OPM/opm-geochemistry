@@ -37,6 +37,7 @@ struct PhysicalConstants
     static constexpr double IdealGasConstant{8.31441}; //  J / K / mol (R_g = N_avo*k_Boltzmann)
 
     static constexpr double atmospheric_pressure{1.01325e5}; // Pa
+    static constexpr double standard_gas_pressure{1.0e5}; // Pa, gas activity reference pressure
     static constexpr double ambient_temperature{ 298.15 }; // K
 
 };

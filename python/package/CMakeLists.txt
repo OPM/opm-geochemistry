@@ -6,11 +6,11 @@ add_custom_target(pygeochem-setuptools ALL
     COMMAND ${CMAKE_COMMAND} -E rm -rf build  # remove build dir created by previous `python setup.py install` commands (see next) to ensure fresh rebuild since changed python files are not overwritten even with --force option
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/pygeochem pygeochem
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:project4py> pygeochem
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:opmgeochemistry> pygeochem
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${GEOCHEM_PYTHON_LIBRARY_TARGET}> pygeochem
     COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH="${PROJECT_PYTHONPATH}" ${CMAKE_COMMAND} -E true
     COMMAND ${PYTHON_EXECUTABLE} setup.py build --quiet --force
     COMMAND ${CMAKE_COMMAND} -E rm pygeochem/$<TARGET_FILE_NAME:project4py>
-    COMMAND ${CMAKE_COMMAND} -E rm pygeochem/$<TARGET_FILE_NAME:opmgeochemistry>
+    COMMAND ${CMAKE_COMMAND} -E rm pygeochem/$<TARGET_FILE_NAME:${GEOCHEM_PYTHON_LIBRARY_TARGET}>
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
