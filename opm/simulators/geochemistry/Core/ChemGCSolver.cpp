@@ -1268,7 +1268,7 @@ void GCSolver::calc_F_sup_min(int j, int pos_j, RealVec& Fchem)
 **/
 void GCSolver::calc_F_gas_phase(int j, int pos_j, RealVec& Fchem)
 {
-    const double fact = 1e-3* Vchem_->gas_phase_frac_ / (PhysicalConstants::IdealGasConstant * Vchem_->Temp_[gFluidPhase::GAS]) * PhysicalConstants::atmospheric_pressure/Z_factor_gas_;
+    const double fact = 1e-3* Vchem_->gas_phase_frac_ / (PhysicalConstants::IdealGasConstant * Vchem_->Temp_[gFluidPhase::GAS]) * PhysicalConstants::standard_gas_pressure/Z_factor_gas_;
 
     for (int gas_i = 0; gas_i < Vchem_->size_gase_phase_; ++gas_i)
     {
@@ -2807,13 +2807,13 @@ void GCSolver::update_fugacity_and_mol_volume_mixtures()
         {
             int pos = Vchem_->pos_gas_phase_[i];
             double fi = POW10(Vchem_->ICS_->SM_mineral_->log_a_[pos]);
-            Vchem_->gas_phase_pressure_[i] = fi / Vchem_->ICS_->SM_mineral_->fugacity_[pos] * PhysicalConstants::atmospheric_pressure;;
+            Vchem_->gas_phase_pressure_[i] = fi / Vchem_->ICS_->SM_mineral_->fugacity_[pos] * PhysicalConstants::standard_gas_pressure;
             Vchem_->Pres_[gFluidPhase::GAS] += Vchem_->gas_phase_pressure_[i];
         }
         for (int i = 0; i < Vchem_->size_gase_phase_; ++i)
         {
             int pos = Vchem_->pos_gas_phase_[i];
-            double fi = POW10(Vchem_->ICS_->SM_mineral_->log_a_[pos]) * PhysicalConstants::atmospheric_pressure; //fugacity
+            double fi = POW10(Vchem_->ICS_->SM_mineral_->log_a_[pos]) * PhysicalConstants::standard_gas_pressure; //fugacity
             Vchem_->mol_fraction_gas_phase_[i] = fi / (Vchem_->ICS_->SM_mineral_->fugacity_[pos] * Vchem_->Pres_[gFluidPhase::GAS]);
         }
         Vchem_->Pres_[gFluidPhase::OIL] = Vchem_->Pres_[gFluidPhase::WATER] = Vchem_->Pres_[gFluidPhase::GAS]; // ignore capillary pressure
@@ -2864,7 +2864,7 @@ void GCSolver::update_fugacity_and_mol_volume_mixtures()
                   // mole volume should not be calculated at current press T only at reference condition
                 if (Vchem_->ICS_->SM_mineral_->model_[pos] == LogKModel::ANA)
                 {
-                    double fi = POW10(Vchem_->ICS_->SM_mineral_->log_a_[pos]) * PhysicalConstants::atmospheric_pressure; //fugacity
+                    double fi = POW10(Vchem_->ICS_->SM_mineral_->log_a_[pos]) * PhysicalConstants::standard_gas_pressure; //fugacity
                     Vchem_->ICS_->SM_mineral_->mol_volume_[pos] = Z_factor_gas_ * Vchem_->ICS_->SM_mineral_->fugacity_[pos] * PhysicalConstants::IdealGasConstant * T / fi;// m^3/mol
                 }
             }
@@ -2879,7 +2879,7 @@ void GCSolver::update_fugacity_and_mol_volume_mixtures()
             for (int i = 0; i < Vchem_->size_gase_phase_; ++i)
             {
                 int pos = Vchem_->pos_gas_phase_[i];
-                [[maybe_unused]] double fi = POW10(Vchem_->ICS_->SM_mineral_->log_a_[pos]) * PhysicalConstants::atmospheric_pressure;
+                [[maybe_unused]] double fi = POW10(Vchem_->ICS_->SM_mineral_->log_a_[pos]) * PhysicalConstants::standard_gas_pressure;
                // Vchem_->mol_fraction_gas_phase_[i] = fi / (Vchem_->ICS_->SM_mineral_->fugacity_[pos] * Vchem_->Pres_[gFluidPhase::GAS]);
             }
         }

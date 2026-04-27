@@ -23,6 +23,142 @@
 */
 #include <opm/simulators/geochemistry/StandaloneSolvers.hpp>
 
+#include <sstream>
+
+#include <opm/simulators/geochemistry/IO/ErrorMsg.hpp>
+#include <opm/simulators/geochemistry/IO/InputReader.hpp>
+#include <opm/simulators/geochemistry/Thermo/ThermoTable.h>
+#include <opm/simulators/geochemistry/Utility/HelpfulStringMethods.hpp>
+
+namespace {
+
+std::vector<std::string> parseSpeciesBlock(const std::vector<std::string>& block_content)
+{
+    std::vector<std::string> species_names;
+    for (const auto& line : block_content)
+    {
+        const auto tokens = split_string(line);
+        if (!tokens.empty())
+        {
+            species_names.push_back(tokens.front());
+        }
+    }
+    return species_names;
+}
+
+std::vector<double> parseNumericBlock(const std::vector<std::string>& block_content, const std::string& block_name)
+{
+    std::vector<double> values;
+    for (const auto& line : block_content)
+    {
+        const auto tokens = split_string(line);
+        for (const auto& token : tokens)
+        {
+            try
+            {
+                values.push_back(std::stod(token));
+            }
+            catch (const std::exception&)
+            {
+                error_and_exit("Could not parse value \"{:s}\" in block {:s}.", token, block_name);
+            }
+        }
+    }
+    return values;
+}
+
+std::vector<std::string> readSpeciesNames(InputReader& input_reader)
+{
+    const auto block_species = parseSpeciesBlock(input_reader.get_block_keyword_content("SPECIESLIST"));
+    if (!block_species.empty())
+    {
+        return block_species;
+    }
+
+    const auto species_name = input_reader.get_simple_keyword_value("Species");
+    if (species_name.empty())
+    {
+        error_and_exit("Need to specify at least one species using keyword Species or block SPECIESLIST.");
+    }
+    return {species_name};
+}
+
+std::vector<double> readScalarOrBlock(InputReader& input_reader,
+                                      const std::string& simple_keyword,
+                                      const std::string& block_keyword)
+{
+    const auto block_values = parseNumericBlock(input_reader.get_block_keyword_content(block_keyword), block_keyword);
+    if (!block_values.empty())
+    {
+        return block_values;
+    }
+
+    try
+    {
+        return {std::stod(input_reader.get_simple_keyword_value(simple_keyword))};
+    }
+    catch (const std::exception&)
+    {
+        error_and_exit("Could not parse keyword {:s}.", simple_keyword);
+    }
+
+    return {};
+}
+
+void convertTemperaturesToCelsius(std::vector<double>& temperatures, const std::string& unit)
+{
+    const auto unit_upper = to_upper_case(unit);
+    if (unit_upper == "C" || unit_upper == "CELSIUS")
+    {
+        return;
+    }
+    if (unit_upper == "K" || unit_upper == "KELVIN")
+    {
+        for (auto& value : temperatures)
+        {
+            value -= 273.15;
+        }
+        return;
+    }
+
+    error_and_exit("Unsupported TempUnit {:s}. Use C or K.", unit);
+}
+
+void convertPressuresToBar(std::vector<double>& pressures, const std::string& unit)
+{
+    const auto unit_upper = to_upper_case(unit);
+    if (unit_upper == "BAR" || unit_upper == "BARS")
+    {
+        return;
+    }
+    if (unit_upper == "PA" || unit_upper == "PASCAL" || unit_upper == "PASCALS")
+    {
+        for (auto& value : pressures)
+        {
+            value *= 1.0e-5;
+        }
+        return;
+    }
+
+    error_and_exit("Unsupported PresUnit {:s}. Use Pa or bar.", unit);
+}
+
+bool parseBoolKeyword(const std::string& value, const std::string& keyword_name)
+{
+    try
+    {
+        return std::stoi(value) != 0;
+    }
+    catch (const std::exception&)
+    {
+        error_and_exit("Could not parse keyword {:s}.", keyword_name);
+    }
+
+    return false;
+}
+
+} // namespace
+
 EquilibriumSolver::EquilibriumSolver()
     : CGeoChemIF()
 {
@@ -879,4 +1015,63 @@ std::vector<EffluentIonData> OneDimensionalTransportSolver::solve(const std::str
         archive(backup_all_effluent_ion_conc);
     }
     return backup_all_effluent_ion_conc;
+}
+
+std::string ThermoTableSolver::solve(const std::string& case_name,
+                                     std::istream& inputStream)
+{
+    (void)case_name;
+
+    std::map<std::string, std::string> simple_key_value_pairs;
+    simple_key_value_pairs["Species"] = "H2O";
+    simple_key_value_pairs["Temp"] = "25.0";
+    simple_key_value_pairs["Pres"] = "1.0e5";
+    simple_key_value_pairs["TempUnit"] = "C";
+    simple_key_value_pairs["PresUnit"] = "Pa";
+    simple_key_value_pairs["IncludeIndex"] = "1";
+
+    InputReader input_reader(simple_key_value_pairs, false);
+    input_reader.define_block_keyword("SPECIESLIST", {"/ END", "/END"});
+    input_reader.define_block_keyword("TEMPS", {"/ END", "/END"});
+    input_reader.define_block_keyword("PRESSURES", {"/ END", "/END"});
+    input_reader.read(inputStream);
+
+    auto species_names = readSpeciesNames(input_reader);
+    auto temperatures_celsius = readScalarOrBlock(input_reader, "Temp", "TEMPS");
+    auto pressures_bar = readScalarOrBlock(input_reader, "Pres", "PRESSURES");
+
+    convertTemperaturesToCelsius(temperatures_celsius, input_reader.get_simple_keyword_value("TempUnit"));
+    convertPressuresToBar(pressures_bar, input_reader.get_simple_keyword_value("PresUnit"));
+
+    const bool include_index = parseBoolKeyword(input_reader.get_simple_keyword_value("IncludeIndex"), "IncludeIndex");
+
+    ThermoTableCalculator calculator;
+    std::ostringstream output;
+    for (std::size_t i = 0; i < species_names.size(); ++i)
+    {
+        const auto rows = calculator.evaluate(species_names[i], temperatures_celsius, pressures_bar);
+
+        if (i > 0)
+        {
+            output << '\n';
+        }
+
+        output << "SPECIES " << species_names[i] << '\n';
+        output << ThermoTableCalculator::formatRows(rows, include_index);
+
+        if (ThermoTableCalculator::isWaterSpeciesName(species_names[i]))
+        {
+            std::vector<double> row_temperatures;
+            row_temperatures.reserve(rows.size());
+            for (const auto& row : rows)
+            {
+                row_temperatures.push_back(row.T);
+            }
+
+            output << "IAPWS97_PSAT_H2O\n";
+            output << calculator.evaluateWaterSaturationPressureFormatted(row_temperatures, include_index);
+        }
+    }
+
+    return output.str();
 }

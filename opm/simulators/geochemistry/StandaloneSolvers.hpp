@@ -24,6 +24,9 @@
 #ifndef STANDALONE_GEOCHEMICAL_SOLVERS_IS_DEF_HPP
 #define STANDALONE_GEOCHEMICAL_SOLVERS_IS_DEF_HPP
 
+#include <istream>
+#include <string>
+
 #include <opm/simulators/geochemistry/GeoChemIF.h>
 
 class EquilibriumSolver final: public CGeoChemIF
@@ -42,6 +45,13 @@ class OneDimensionalTransportSolver final: public CGeoChemIF
 
     std::vector<EffluentIonData> solve(const std::string& case_name,
                                        std::istream& inputStream);
+};
+
+class ThermoTableSolver final
+{
+  public:
+    std::string solve(const std::string& case_name,
+                      std::istream& inputStream);
 };
 
 #endif  // STANDALONE_GEOCHEMICAL_SOLVERS_IS_DEF_HPP

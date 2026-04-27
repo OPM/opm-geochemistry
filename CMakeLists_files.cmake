@@ -36,6 +36,7 @@ set(GEOCHEM_CORE_SOURCE_FILES
     opm/simulators/geochemistry/Thermo/eps_JN.cpp
     opm/simulators/geochemistry/Thermo/hkf.cpp
     opm/simulators/geochemistry/Thermo/ions.cpp
+    opm/simulators/geochemistry/Thermo/ThermoTable.cpp
     opm/simulators/geochemistry/Thermo/thermodata.cpp
     opm/simulators/geochemistry/Thermo/water.cpp
     opm/simulators/geochemistry/Utility/HelpfulStringMethods.cpp
@@ -91,6 +92,7 @@ set(GEOCHEM_CORE_PUBLIC_HEADER_FILES
     opm/simulators/geochemistry/Thermo/eps_JN.h
     opm/simulators/geochemistry/Thermo/hkf.h
     opm/simulators/geochemistry/Thermo/ions.h
+    opm/simulators/geochemistry/Thermo/ThermoTable.h
     opm/simulators/geochemistry/Thermo/thermodata.h
     opm/simulators/geochemistry/Thermo/water.h
     opm/simulators/geochemistry/Utility/HelperMacros.hpp

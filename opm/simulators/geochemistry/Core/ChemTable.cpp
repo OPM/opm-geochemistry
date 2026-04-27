@@ -848,6 +848,12 @@ void ChemTable::init_tables()
     c2_         = pick_column<double>("c2");
     a7_         = pick_column<double>("a7");
     omega_      = pick_column<double>("omega");
+
+    // These vectors hold HKF properties derived later from the database rows.
+    re_.resize(noRows_, 0.0);
+    dG_TP_.resize(noRows_, 0.0);
+    molar_volume_PT_.resize(noRows_, 0.0);
+    Cp_PT_.resize(noRows_, 0.0);
 }
 
 void  ChemTable::add_cubic_EOS_parameters_for_gases()

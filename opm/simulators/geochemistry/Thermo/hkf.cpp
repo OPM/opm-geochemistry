@@ -23,12 +23,16 @@
 */
 #include <opm/simulators/geochemistry/Thermo/hkf.h>
 
+#include <cmath>
+
 hkf::hkf()
 : rhow_(0.0)
 , epsw_(0.0)
 , G_(0.0)
 , H_(0.0)
 , S_(0.0)
+, V_(0.0)
+, Cp_(0.0)
 , Tref_(298.15)  // K
 , Tref2_inv_(1.0/88893.4225) // K^-2
 , Pref_(1.0e5)  // Pa
@@ -55,13 +59,155 @@ hkf::hkf()
      */
 }
 
-void hkf::WaterProp(double T, double P)
+double hkf::propertyShift(double G_ref, double H_ref, double S_ref, double T_ref)
 {
-    EPS_->permittivity(T, P);
+    return H_ref - G_ref - T_ref*S_ref;
+}
+
+void hkf::updateWaterState(double T, double P)
+{
+    EPS_->permittivity_TP(T, P);
     rhow_ = W_->denst_;
     epsw_ = EPS_->permittivity_;
-    G_ = W_->G_ + Gtr_ + Ttr_*Str_ - T*Str_; // g_1-g_2 = h_1-h_2 - T_1*s_1 + T_2*s_2
-    //std::cout << "G=" << G_ << ", H=" << H_ << ", s=" << S_ << ", rho=" << rhow_ << ", epsw=" << epsw_ << "\n";
+}
+
+void hkf::WaterProp(double T, double P)
+{
+    const auto props = waterProperties(T, P);
+    G_ = props.G;
+    H_ = props.H;
+    S_ = props.S;
+    V_ = props.V;
+    Cp_ = props.Cp;
+}
+
+double hkf::waterSaturationPressure(double T) const
+{
+    return water::PsatIAPWS(T);
+}
+
+double hkf::waterVaporLogK(double T, double gas_activity_reference_pressure) const
+{
+    return std::log10(gas_activity_reference_pressure / waterSaturationPressure(T));
+}
+
+StandardStateProperties hkf::waterProperties(double T, double P)
+{
+    updateWaterState(T, P);
+
+    StandardStateProperties props;
+    props.G = W_->G_ + Gtr_ + Ttr_*Str_ - T*Str_;
+    props.H = W_->H_ + Htr_;
+    props.S = W_->s_ * water_molar_mass_ + Str_;
+    props.V = W_->v_ * water_molar_mass_;
+    props.Cp = W_->cp_ * water_molar_mass_;
+    return props;
+}
+
+StandardStateProperties hkf::mineralProperties(double T,
+                                               double P,
+                                               double G_ref,
+                                               double H_ref,
+                                               double S_ref,
+                                               double a,
+                                               double b,
+                                               double c,
+                                               double V_ref)
+{
+    updateWaterState(T, P);
+
+    const double dT = T - Tref_;
+    const double dP = P - Pref_;
+    const double T_inv = 1.0 / T;
+    const double T_inv2 = T_inv*T_inv;
+    const double logTTref = std::log(T / Tref_);
+
+    StandardStateProperties props;
+    props.G = G_ref - S_ref*dT
+              + a*(dT - T*logTTref)
+              - 0.5*b*dT*dT
+              - 0.5*c*Tref2_inv_*T_inv*dT*dT
+              + V_ref*dP;
+    props.S = S_ref + a*logTTref + b*dT + 0.5*c*(Tref2_inv_ - T_inv2);
+    props.Cp = a + b*T + c*T_inv2;
+    props.V = V_ref;
+    props.H = props.G + T*props.S + propertyShift(G_ref, H_ref, S_ref, Tref_);
+    return props;
+}
+
+StandardStateProperties hkf::ionProperties(double T,
+                                           double P,
+                                           double G_ref,
+                                           double H_ref,
+                                           double S_ref,
+                                           double a1,
+                                           double a2,
+                                           double a3,
+                                           double a4,
+                                           double c1,
+                                           double c2,
+                                           double omega,
+                                           double Z,
+                                           double re_ref)
+{
+    updateWaterState(T, P);
+    BORN_->born_df(T, P);
+
+    const double dT = T - Tref_;
+    const double Tp = T / Tref_;
+    const double dP = P*Pref_inv_ - 1.0;
+
+    const double theta_diff = T - Theta_;
+    const double theta_diff_inv = 1.0 / theta_diff;
+    const double theta_diff_inv2 = theta_diff_inv*theta_diff_inv;
+    const double theta_diff_inv3 = theta_diff_inv2*theta_diff_inv;
+
+    const double C1 = dT - T*std::log(T / Tref_);
+    const double log_kernel = std::log(Tp*(Tref_ - Theta_) / theta_diff);
+    const double C2 = -T / Theta_ / Theta_*log_kernel - dT / Theta_ / (Tref_ - Theta_);
+    const double A1 = dP;
+    const double A2 = std::log((Psi_ + P) / (Psi_ + Pref_));
+    const double A3 = dP*theta_diff_inv;
+    const double A4 = A2*theta_diff_inv;
+
+    const double Wref = Z_ref_ - EPS_->bornZ_ + Y_ref_*dT;
+    const double W = -EPS_->bornZ_ - 1.0;
+
+    double Wi = 0.0;
+    double w_T = 0.0;
+    double w_TT = 0.0;
+    double w_P = 0.0;
+    if (Z != 0.0)
+    {
+        BORN_->born(Z, re_ref, Wi, w_T, w_TT, w_P);
+    }
+
+    StandardStateProperties props;
+    props.G = G_ref - S_ref*dT + c1*C1 + c2*C2 + a1*A1 + a2*A2 + a3*A3 + a4*A4 + (Wi - omega)*W + omega*Wref;
+
+    const double C2_T = -log_kernel / (Theta_*Theta_) + 1.0 / (Theta_*theta_diff) - 1.0 / (Theta_*(Tref_ - Theta_));
+    props.S = S_ref
+              + c1*std::log(T / Tref_)
+              - c2*C2_T
+              + a3*dP*theta_diff_inv2
+              + a4*A2*theta_diff_inv2
+              - w_T*W
+              + Wi*EPS_->bornY_
+              - omega*Y_ref_;
+
+    const double born_TT = w_TT*W - 2.0*w_T*EPS_->bornY_ - Wi*EPS_->bornX_;
+    props.Cp = c1
+               + c2*theta_diff_inv2
+               - 2.0*T*(a3*dP + a4*A2)*theta_diff_inv3
+               - T*born_TT;
+
+    const double MV1 = 1.0 / (Psi_*Pref_inv_ + P*Pref_inv_);
+    const double Chat = 41.84e-3 / UnitConversionFactors::cal2J_;
+    props.V = a1 + a2*MV1 + (a3 + a4*MV1)*theta_diff_inv - 1e5*omega*EPS_->bornQ_ - (EPS_->bornZ_ + 1.0)*w_P*1e5;
+    props.V *= Chat;
+
+    props.H = props.G + T*props.S + propertyShift(G_ref, H_ref, S_ref, Tref_);
+    return props;
 }
 
 /* P [Pa], T [K] */
@@ -119,7 +265,7 @@ void hkf::dGIons(double T, double P, double* G, double* S,
     
     double ff;
     double Wi = 0.;
-    double w_T, w_TT, w_P;
+    double w_T, w_TT, w_P, Wi_2;
 
     for (int i = 0; i < size; ++i)
     {
@@ -134,7 +280,8 @@ void hkf::dGIons(double T, double P, double* G, double* S,
             {
 //                BORN_->born(Z[i], re_ref[i], Wi);
                 
-                BORN_->born(Z[i], re_ref[i], Wi, w_T, w_TT, w_P);
+                BORN_->born(Z[i], re_ref[i], Wi_2, w_T, w_TT, w_P);
+                Wi = Wi_2;
  //               w_P = 0.;
                 
                 ff = (Wi-omega[i])*W;
