@@ -3,7 +3,7 @@ file(GLOB_RECURSE CPP_FILES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} *.cpp)
 
 add_library(EquilibriumTestCases ${HPP_FILES} ${CPP_FILES})
 
-target_link_libraries(EquilibriumTestCases PRIVATE opmgeochemistry)
+target_link_libraries(EquilibriumTestCases PRIVATE ${GEOCHEM_TEST_LIBRARY_TARGET})
 
 target_include_directories(EquilibriumTestCases
                            PRIVATE

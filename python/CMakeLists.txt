@@ -1,7 +1,13 @@
+if(NOT GEOCHEM_PYTHON_LIBRARY_TARGET)
+    message(FATAL_ERROR "GEOCHEM_PYTHON_LIBRARY_TARGET must be set before adding the python subdirectory.")
+endif()
+
 add_subdirectory(package)
 
-# Flag to make python bindings compile (there is an issue with the fmt library, otherwise)
-target_compile_options(opmgeochemistry PUBLIC -fPIC)
+if(NOT WIN32)
+    # Flag to make python bindings compile (there is an issue with the fmt library, otherwise)
+    target_compile_options(${GEOCHEM_PYTHON_LIBRARY_TARGET} PUBLIC -fPIC)
+endif()
 
 # Collect all .py.cxx files, and add them to Python module
 # file(GLOB_RECURSE CXX_FILES_PY RELATIVE ${PROJECT_SOURCE_DIR}/opm/simulators/ *.py.cxx)
@@ -12,7 +18,7 @@ pybind11_add_module(project4py ${PROJECT_SOURCE_DIR}/opm/simulators/GeochemPytho
 target_include_directories(project4py PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/opm/simulators/geochemistry/)
 
 # Link libraries
-target_link_libraries(project4py PRIVATE opmgeochemistry)
+target_link_libraries(project4py PRIVATE ${GEOCHEM_PYTHON_LIBRARY_TARGET})
 
 # This is needed to avoid compilation issues when using clang-9 and c++17
 if(${CMAKE_CXX_COMPILER_ID} STREQUAL Clang AND ${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 10.0.0)

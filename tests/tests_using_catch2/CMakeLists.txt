@@ -57,7 +57,7 @@ target_link_libraries(
     catch2_tests
     PRIVATE
     ApprovalTests::ApprovalTests
-    opmgeochemistry
+    ${GEOCHEM_TEST_LIBRARY_TARGET}
     EquilibriumTestCases
     RunGeoChem
 )
@@ -72,7 +72,15 @@ target_include_directories(catch2_tests
 
 add_test(NAME run_catch2_tests COMMAND catch2_tests WORKING_DIRECTORY ${CATCH2_BIN_RUN_DIR})
 
-list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/contrib)
+find_path(GEOCHEM_CATCH_MODULE_DIR Catch.cmake
+          HINTS
+            "${catch2_SOURCE_DIR}/contrib"
+            "${Catch2_SOURCE_DIR}/contrib"
+            "${catch2_SOURCE_DIR}/extras"
+            "${Catch2_SOURCE_DIR}/extras")
+if(GEOCHEM_CATCH_MODULE_DIR)
+  list(APPEND CMAKE_MODULE_PATH ${GEOCHEM_CATCH_MODULE_DIR})
+endif()
 include(CTest)  # this adds BUILD_TESTING, which defaults to ON
 include(Catch)
 catch_discover_tests(catch2_tests WORKING_DIRECTORY ${CATCH2_BIN_RUN_DIR})
