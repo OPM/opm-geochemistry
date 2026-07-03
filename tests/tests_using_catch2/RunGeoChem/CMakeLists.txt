@@ -3,7 +3,7 @@ set(LIB_SOURCES RegisterTests.cpp SetupAndRunSolver.cpp)
 
 add_library(RunGeoChem ${LIB_HEADERS} ${TEST_HEADERS} ${LIB_SOURCES})
 
-target_link_libraries(RunGeoChem PRIVATE opmgeochemistry)
+target_link_libraries(RunGeoChem PRIVATE ${GEOCHEM_TEST_LIBRARY_TARGET})
 
 target_include_directories(RunGeoChem
                            PRIVATE
