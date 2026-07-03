@@ -4,10 +4,9 @@ endif()
 
 add_subdirectory(package)
 
-if(NOT WIN32)
-    # Flag to make python bindings compile (there is an issue with the fmt library, otherwise)
-    target_compile_options(${GEOCHEM_PYTHON_LIBRARY_TARGET} PUBLIC -fPIC)
-endif()
+# The Python extension links this library into a shared module.
+set_target_properties(${GEOCHEM_PYTHON_LIBRARY_TARGET}
+    PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Collect all .py.cxx files, and add them to Python module
 # file(GLOB_RECURSE CXX_FILES_PY RELATIVE ${PROJECT_SOURCE_DIR}/opm/simulators/ *.py.cxx)
