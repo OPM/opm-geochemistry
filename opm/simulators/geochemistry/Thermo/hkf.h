@@ -24,10 +24,21 @@
 #ifndef HKF_H
 #define HKF_H
 
+#include <memory>
+
 #include <opm/simulators/geochemistry/Thermo/eps_JN.h>
 #include <opm/simulators/geochemistry/Thermo/ions.h>
 #include <opm/simulators/geochemistry/Thermo/thermodata.h>
 #include <opm/simulators/geochemistry/Thermo/water.h>
+
+struct StandardStateProperties
+{
+    double G{0.0};   // Gibbs free energy [J/mol]
+    double H{0.0};   // Enthalpy [J/mol]
+    double S{0.0};   // Entropy [J/mol/K]
+    double V{0.0};   // Molar volume [m^3/mol]
+    double Cp{0.0};  // Isobaric heat capacity [J/mol/K]
+};
 
 class hkf
 {
@@ -36,8 +47,35 @@ public:
     hkf();
     
     void WaterProp(double T, double P);
+    [[nodiscard]] double waterSaturationPressure(double T) const;
+    [[nodiscard]] double waterVaporLogK(double T, double gas_activity_reference_pressure) const;
+
+    [[nodiscard]] StandardStateProperties waterProperties(double T, double P);
+    [[nodiscard]] StandardStateProperties mineralProperties(double T,
+                                                            double P,
+                                                            double G,
+                                                            double H,
+                                                            double S,
+                                                            double a,
+                                                            double b,
+                                                            double c,
+                                                            double V);
+    [[nodiscard]] StandardStateProperties ionProperties(double T,
+                                                        double P,
+                                                        double G,
+                                                        double H,
+                                                        double S,
+                                                        double a1,
+                                                        double a2,
+                                                        double a3,
+                                                        double a4,
+                                                        double c1,
+                                                        double c2,
+                                                        double omega,
+                                                        double Z,
+                                                        double re_ref);
     
-    void dGMineral(double T, double P, double* G, double* S, double* a, double* c, double* b, double* V, int size, double* logK);
+    void dGMineral(double T, double P, double* G, double* S, double* a, double* b, double* c, double* V, int size, double* logK);
     
     void dGIons(double T, double P, double* G, double* S,
                 double* a1, double* a2, double* a3, double* a4,
@@ -47,9 +85,11 @@ public:
     
     double rhow_;
     double epsw_;
-    double G_;  // Gibbs free energy ref Tripple point of H2O
-    double H_;  // Entalpy  ref Triple point of H2O
-    double S_;  // Entropy  ref Triple point of H2O
+    double G_;   // Standard molal Gibbs free energy of formation for H2O [J/mol]
+    double H_;   // Standard molal enthalpy of formation for H2O [J/mol]
+    double S_;   // Standard molal entropy for H2O [J/mol/K]
+    double V_;   // Standard molal volume for H2O [m^3/mol]
+    double Cp_;  // Standard molal isobaric heat capacity for H2O [J/mol/K]
     
 private:
     
@@ -60,6 +100,7 @@ private:
     static constexpr double Rg_inv_ = 0.12027239580856473682150703284415;
     static constexpr double loge_ = 0.43429448190325182765112891891661;
     static constexpr double ln10_ = 2.3025850929940456840179914546844;
+    static constexpr double water_molar_mass_ = 18.01528e-3;  // kg/mol
     
     double Tref_;
     double Tref2_inv_;
@@ -72,9 +113,12 @@ private:
     double Z_ref_;
     
     double Gtr_;
-    double Htr_;  // not used?
+    double Htr_;
     double Str_;
     double Ttr_;
+
+    void updateWaterState(double T, double P);
+    [[nodiscard]] static double propertyShift(double G_ref, double H_ref, double S_ref, double T_ref);
     
 };
 

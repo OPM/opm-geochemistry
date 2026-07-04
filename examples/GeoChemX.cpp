@@ -55,6 +55,19 @@ int main(int argc, char* argv[])
             transportSolver.solve(inp.getName(), inp.getStream());
         }
     }
+    else if (argc >= 2 && strcmp(argv[1], "THERMOTABLE") == 0)
+    {
+        if (argc == 2)
+        {
+            std::cout << "Need to specify an input file for the thermo table solver.\n";
+        }
+        else
+        {
+            auto inp = InputFileHandler(argv[2]);
+            ThermoTableSolver thermoTableSolver;
+            std::cout << thermoTableSolver.solve(inp.getName(), inp.getStream());
+        }
+    }
     else{
         std::cout << "No commands were given ... do not bother me unnecessarily\n!";
     }
