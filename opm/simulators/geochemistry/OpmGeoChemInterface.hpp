@@ -23,9 +23,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstddef>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 
 class OpmGeoChemInterface final : public CGeoChemIF
@@ -50,7 +53,7 @@ public:
     void initialize(const std::string& file_name,
                     double temperature,
                     double porosity,
-                    const std::vector<std::string> user_order = {});
+                    const std::vector<std::string>& user_order = {});
 
     /*!
     * \brief Initialize geochemistry solver from JSON file
@@ -61,7 +64,7 @@ public:
     * \note user_order ensures that internal geochemistry solver and OPM orders species concentration the same way
     */
     void initialize_json(const std::string& file_name,
-                         const std::vector<std::string> user_order = {});
+                         const std::vector<std::string>& user_order = {});
 
     /*!
     * \brief Initialize geochemistry solver from JSON file and species from OPM deck
@@ -75,12 +78,22 @@ public:
     * \param splay_tree_resolution Splay tree resolution
     */
     void initialize_from_opm_deck(const std::string& file_name,
-                                  const std::vector<std::string> species,
-                                  const std::vector<std::string> minerals,
-                                  const std::vector<std::string> ion_ex,
+                                  const std::vector<std::string>& species,
+                                  const std::vector<std::string>& minerals,
+                                  const std::vector<std::string>& ion_ex,
                                   bool charge_balance,
                                   std::pair<double, double> tol,
                                   int splay_tree_resolution);
+
+    /*!
+    * \brief Map minerals in the OPM deck to the order of the geochemistry solver
+    *
+    * \param deck_minerals Mineral names in deck order
+    * \return Index in the geochemistry solver's mineral order of each mineral in deck_minerals
+    *
+    * \warning Must be called after initialize_from_opm_deck().
+    */
+    std::vector<std::size_t> mineral_index_map(const std::vector<std::string>& deck_minerals) const;
 
     /*!
     * \brief Calculate initial mineral concentration
@@ -91,7 +104,7 @@ public:
     */
     void calculate_initial_mineral_concentration(std::vector<double>& Cmin,
                                                  double porosity,
-                                                 std::unordered_map<std::string, double> weight_mineral);
+                                                 const std::unordered_map<std::string, double> &weight_mineral);
 
     /*!
     * \brief Set surface concentrations
@@ -107,26 +120,17 @@ public:
     void set_surface_concentrations(double swat,
                                     std::vector<double>& C_tot,
                                     double& frac_DL,
-                                    std::unordered_map<std::string, double> C_io);
+                                    const std::unordered_map<std::string, double>& C_io);
 
     /*!
     * \brief Get the log a mineral object
     *
     * \return Reference to log a mineral vector
     */
-    std::vector<double>& get_log_a_mineral() const;
+    std::vector<double>& get_log_a_mineral();
+    const std::vector<double>& get_log_a_mineral() const;
 
 private:
-    /*!
-    * \brief Append species from OPM deck to geochemistry JSON file
-    *
-    * \param file_name JSON file name
-    * \param user_order Species order
-    * \returns JSON object with species append
-    */
-    nlohmann::json appendUserSpeciesToJSON_(const std::string& file_name,
-                                            const std::vector<std::string> species_names);
-
     /*!
     * \brief Append species from OPM deck to geochemistry JSON file
     *
@@ -137,11 +141,11 @@ private:
     * \param ion_ex Ion exchange names
     * \returns JSON object with definitions for geochemistry solver
     */
-    nlohmann::json opmDeckSpeciesToJSON_(const std::string& file_name,
-                                         bool charge_balance,
-                                         const std::vector<std::string> species = {},
-                                         const std::vector<std::string> minerals = {},
-                                         const std::vector<std::string> ion_ex = {});
+    static nlohmann::json opmDeckSpeciesToJSON_(const std::string& file_name,
+                                                bool charge_balance,
+                                                const std::vector<std::string>& species = {},
+                                                const std::vector<std::string>& minerals = {},
+                                                const std::vector<std::string>& ion_ex = {});
 
     /*!
     * \brief Check if species order are the same as internally in geochemistry solver
@@ -149,8 +153,8 @@ private:
     * \param file_name JSON file name
     * \param user_order Species order
     */
-    void checkUserOrder_(const std::vector<std::string> user_order,
-                         std::optional<std::string> file_name = std::nullopt);
+    void checkUserOrder_(const std::vector<std::string>& user_order,
+                         const std::optional<std::string>& file_name = std::nullopt);
 
     /*!
     * \brief Set tolerances for solver

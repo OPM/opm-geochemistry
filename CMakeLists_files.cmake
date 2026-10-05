@@ -44,6 +44,7 @@ set(GEOCHEM_CORE_SOURCE_FILES
 
 set(GEOCHEM_OPM_SOURCE_FILES
     opm/models/io/vtkgeochemistryparams.cpp
+    opm/simulators/flow/GeochemistryModelParameters.cpp
     opm/simulators/geochemistry/OpmGeoChemInterface.cpp
 )
 
@@ -104,6 +105,7 @@ set(GEOCHEM_OPM_PUBLIC_HEADER_FILES
     opm/models/io/vtkgeochemistrymodule.hpp
     opm/models/io/vtkgeochemistryparams.hpp
     opm/simulators/flow/FlowProblemGeochemistry.hpp
+    opm/simulators/flow/GeochemistryModelParameters.hpp
     opm/simulators/geochemistry/OpmGeoChemInterface.hpp
 )
 
