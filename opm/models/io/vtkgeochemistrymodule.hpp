@@ -7,7 +7,7 @@
 
   OPM is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
-  the Free Software Foundation, either version 2 of the License, or
+  the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
   OPM is distributed in the hope that it will be useful,
@@ -17,13 +17,9 @@
 
   You should have received a copy of the GNU General Public License
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
-
-  Consult the COPYING file in the top-level source directory of this
-  module for the precise wording of the license and the list of
-  copyright holders.
 */
-#ifndef VTK_GEOCHEMICAL_MODULE_HPP
-#define VTK_GEOCHEMICAL_MODULE_HPP
+#ifndef VTK_GEOCHEMISTRY_MODULE_HPP
+#define VTK_GEOCHEMISTRY_MODULE_HPP
 
 #include <opm/models/io/baseoutputmodule.hh>
 #include <opm/models/io/vtkgeochemistryparams.hpp>
@@ -88,8 +84,8 @@ public:
 
             if (params_.mineralConcentrationOutput_ && geochemistryModel.numMinerals() > 0) {
                 mineralConcentration_.resize(geochemistryModel.numMinerals());
-                for (std::size_t speciesIdx = 0; speciesIdx < geochemistryModel.numMinerals(); ++speciesIdx) {
-                    this->resizeScalarBuffer_(mineralConcentration_[speciesIdx], BufferType::Dof);
+                for (std::size_t mineralIdx = 0; mineralIdx < geochemistryModel.numMinerals(); ++mineralIdx) {
+                    this->resizeScalarBuffer_(mineralConcentration_[mineralIdx], BufferType::Dof);
                 }
             }
         }
@@ -121,11 +117,11 @@ public:
             }
 
             if (params_.mineralConcentrationOutput_ && geochemistryModel.numMinerals() > 0) {
-                for (std::size_t speciesIdx = 0; speciesIdx < geochemistryModel.numMinerals(); ++speciesIdx) {
+                for (std::size_t mineralIdx = 0; mineralIdx < geochemistryModel.numMinerals(); ++mineralIdx) {
                     for (unsigned dofIdx = 0; dofIdx < elemCtx.numPrimaryDof(/*timeIdx=*/0); ++dofIdx) {
                         const unsigned globalDofIdx = elemCtx.globalSpaceIndex(dofIdx, /*timeIdx=*/0);
-                        mineralConcentration_[speciesIdx][globalDofIdx] =
-                            geochemistryModel.mineralConcentration(speciesIdx, globalDofIdx);
+                        mineralConcentration_[mineralIdx][globalDofIdx] =
+                            geochemistryModel.mineralConcentration(mineralIdx, globalDofIdx);
                     }
                 }
             }
@@ -163,11 +159,11 @@ public:
 
             }
             if (params_.mineralConcentrationOutput_ && geochemistryModel.numMinerals() > 0) {
-                for (std::size_t speciesIdx = 0; speciesIdx < geochemistryModel.numMinerals(); ++speciesIdx) {
-                    const std::string mname = "mineralConcentration_" + geochemistryModel.mineralName(speciesIdx);
+                for (std::size_t mineralIdx = 0; mineralIdx < geochemistryModel.numMinerals(); ++mineralIdx) {
+                    const std::string mname = "mineralConcentration_" + geochemistryModel.mineralName(mineralIdx);
                     this->commitScalarBuffer_(baseWriter,
                                               mname.c_str(),
-                                              mineralConcentration_[speciesIdx],
+                                              mineralConcentration_[mineralIdx],
                                               BufferType::Dof);
                 }
             }

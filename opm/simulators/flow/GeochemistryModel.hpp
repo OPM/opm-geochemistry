@@ -7,7 +7,7 @@
 
   OPM is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
-  the Free Software Foundation, either version 2 of the License, or
+  the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
   OPM is distributed in the hope that it will be useful,
@@ -17,10 +17,6 @@
 
   You should have received a copy of the GNU General Public License
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
-
-  Consult the COPYING file in the top-level source directory of this
-  module for the precise wording of the license and the list of
-  copyright holders.
 */
 #ifndef GEOCHEMISTRY_MODEL_HPP
 #define GEOCHEMISTRY_MODEL_HPP
@@ -31,6 +27,7 @@
 
 #include <opm/common/OpmLog/OpmLog.hpp>
 
+#include <opm/input/eclipse/EclipseState/EclipseState.hpp>
 #include <opm/input/eclipse/EclipseState/Geochemistry/GenericSpeciesConfig.hpp>
 #include <opm/input/eclipse/Schedule/Well/Well.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellTracerProperties.hpp>
@@ -40,21 +37,25 @@
 #include <opm/models/parallel/threadmanager.hpp>
 #include <opm/models/utils/propertysystem.hh>
 
+#include <opm/simulators/flow/GeochemistryModelParameters.hpp>
 #include <opm/simulators/geochemistry/OpmGeoChemInterface.hpp>
 #include <opm/simulators/wells/WellTracerRate.hpp>
 
 #include <fmt/format.h>
 
 #include <algorithm>
-#include <filesystem>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <iterator>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace Opm {
-
-class EclipseState;
-class Well;
 
 template <class TypeTag>
 class GeochemistryModel
@@ -71,7 +72,26 @@ class GeochemistryModel
 
     enum { waterPhaseIdx = FluidSystem::waterPhaseIdx };
 
-    static constexpr int dimWorld = Grid::dimensionworld;
+    static constexpr int maxNumSubsteps = 100;
+
+    struct WellSource
+    {
+        std::vector<Scalar> speciesInjectionRate; //!< Species amount injected per time
+        Scalar waterProductionRate {0}; //!< Water produced per time
+    };
+    struct ProducerConnection
+    {
+        std::size_t wellSeqIndex; //!< Sequence index of the well
+        std::size_t cell; //!< Cell of the connection
+        Scalar rate; //!< Water rate of the connection
+        int segment; //!< Segment of the connection for a multisegment well, otherwise -1
+    };
+    struct FaceFlux
+    {
+        unsigned neighbour; //!< Cell on the other side of the face
+        Scalar flux; //!< Water flux out of the cell, in surface volume per time
+        bool isUp; //!< True if the cell itself is upstream
+    };
 
 public:
     /*!
@@ -85,6 +105,14 @@ public:
         , cartMapper_(simulator.vanguard().cartesianIndexMapper())
         , element_chunks_(simulator.gridView(), Dune::Partitions::all, ThreadManager::maxThreads())
     {}
+
+    /*!
+     * \brief Register runtime parameters
+     */
+    static void registerParameters()
+    {
+        GeochemistryModelParameters<Scalar>::registerParameters();
+    }
 
     /*!
     * \brief Initialize geochemistry model
@@ -101,28 +129,30 @@ public:
 
         // Get transported species names
         const auto& species = eclState_.species();
-        std::transform(species.begin(), species.end(), std::back_inserter(speciesNames_),
-                       [] (const auto& item) { return item.name; } );
+        speciesNames_.reserve(species.size());
+        std::ranges::transform(species, std::back_inserter(speciesNames_),
+                               [] (const auto& item) { return item.name; } );
 
         // Get mineral names
         const auto& mineral = eclState_.mineral();
         if (!mineral.empty()) {
             mineralNames_.reserve(mineral.size());
-            std::transform(mineral.begin(), mineral.end(), std::back_inserter(mineralNames_),
-                           [] (const auto& item) { return item.name; } );
+            std::ranges::transform(mineral, std::back_inserter(mineralNames_),
+                                   [] (const auto& item) { return item.name; } );
         }
 
         // Get ion exchange names
         const auto& ion_exchange = eclState_.ionExchange();
         if (!ion_exchange.empty()) {
             ionExNames_.reserve(ion_exchange.size());
-            std::transform(ion_exchange.begin(), ion_exchange.end(), std::back_inserter(ionExNames_),
-                           [] (const auto& item) { return item.name; } );
+            std::ranges::transform(ion_exchange, std::back_inserter(ionExNames_),
+                                   [] (const auto& item) { return item.name; } );
         }
 
         // Initialize interface to geochemistry solver
         const auto& file_name = geochem.geochem_file_name();
-        std::pair<double, double> tol = std::make_pair<double, double>(geochem.mbal_tol(), geochem.ph_tol());
+        std::pair<double, double> tol =
+                std::make_pair<double, double>(geochem.mbal_tol(), geochem.ph_tol());
         bool charge_balance = geochem.charge_balance();
         int splay_tree_resolution = geochem.splay_tree_resolution();
         geoChemInterface_ = std::make_shared<OpmGeoChemInterface>();
@@ -134,24 +164,45 @@ public:
                                                     tol,
                                                     splay_tree_resolution);
 
+        // Minerals and ion exchangers must be the same in the deck and the geochemistry solver
+        if (geoChemInterface_->numberOfMinerals() != numMinerals()) {
+            throw std::runtime_error(
+                fmt::format("The geochemistry solver has {} minerals, but {} are given by the "
+                            "MINERAL keyword in the deck.",
+                            geoChemInterface_->numberOfMinerals(),
+                            numMinerals()));
+        }
+        // The solver orders minerals differently from the deck, hence an index mapping is needed
+        deckToSolverMineral_ = geoChemInterface_->mineral_index_map(mineralNames_);
+        if (geoChemInterface_->numberOfIonExchange() != numIonEx()) {
+            throw std::runtime_error(
+                fmt::format("The geochemistry solver has {} ion exchange species, but {} are given "
+                            "by the IONEX keyword in the deck.",
+                            geoChemInterface_->numberOfIonExchange(),
+                            numIonEx()));
+        }
+
         // Initialize species independent vectors
         const std::size_t numGridDof = simulator_.model().numGridDof();
         pH_.resize(numGridDof, 7.0);
         sigma_.resize(numGridDof, 0.0);
         psi_.resize(numGridDof, 0.0);
-        initial_equil_.resize(numGridDof, true);
         vol1_.resize(numGridDof);
+        volumeNew_.resize(numGridDof);
+        faceFluxes_.resize(numGridDof);
 
         // Fill in species concentrations
         const std::size_t nSpecies = numSpecies();
         concentration_.resize(nSpecies);
         concentrationInitial_.resize(nSpecies);
         Cads_.resize(nSpecies);
+        concentrationNext_.resize(nSpecies);
         for (std::size_t speciesIdx = 0; speciesIdx < nSpecies;  ++speciesIdx) {
             const auto& single_species = species[speciesIdx];
             concentration_[speciesIdx].resize(numGridDof);
             concentrationInitial_[speciesIdx].resize(numGridDof);
             Cads_[speciesIdx].resize(numGridDof);
+            concentrationNext_[speciesIdx].resize(numGridDof);
 
             // Initial concentration for species
             setInitialConcentrations_(single_species, concentration_[speciesIdx]);
@@ -200,6 +251,11 @@ public:
 
         // Store variables from previous time step
         updateStorageCache();
+
+        // Equilibrate the initial state, which is only done in the first time step
+        if (!initialEquilibrationDone_) {
+            initialEquilibration_();
+        }
     }
 
     /*!
@@ -224,7 +280,7 @@ public:
     */
     std::size_t numSpecies() const
     {
-        return eclState_.species().size();
+        return speciesNames_.size();
     }
 
     /*!
@@ -234,7 +290,7 @@ public:
     */
     std::size_t numMinerals() const
     {
-        return eclState_.mineral().size();
+        return mineralNames_.size();
     }
 
     /*!
@@ -244,7 +300,7 @@ public:
     */
     std::size_t numIonEx() const
     {
-        return eclState_.ionExchange().size();
+        return ionExNames_.size();
     }
 
     /*!
@@ -283,21 +339,6 @@ public:
     }
 
     /*!
-    * \brief Get WSPECIES for a particular species
-    *
-    * \param eclWell Reference to eclWell object
-    * \param name Name of species
-    * \param summaryState SummaryState object
-    * \returns Concentration of injected species
-    */
-    Scalar currentWSPECIES_(const Well& eclWell, const std::string& name, const SummaryState& summaryState) const
-    {
-        return eclWell.getSpeciesProperties().getConcentration(WellTracerProperties::Well { eclWell.name() },
-                                                               WellTracerProperties::Tracer { name },
-                                                               summaryState);
-    }
-
-    /*!
     * \brief Get concentration of a species at a grid cell
     *
     * \param speciesIdx Index of species
@@ -316,7 +357,7 @@ public:
     /*!
     * \brief Get concentration of a mineral at a grid cell
     *
-    * \param speciesIdx Index of mineral
+    * \param minSpeciesIdx Index of mineral (deck order)
     * \param globalDofIdx Cell index
     * \returns Concentration of mineral
     */
@@ -326,7 +367,8 @@ public:
             return 0.0;
         }
 
-        return Cmin_[minSpeciesIdx][globalDofIdx];
+        // Cmin_ is in solver order, minSpeciesIdx is in deck order
+        return Cmin_[deckToSolverMineral_[minSpeciesIdx]][globalDofIdx];
     }
 
     /*!
@@ -337,6 +379,10 @@ public:
     */
     Scalar PH(int globalDofIdx) const
     {
+        if (pH_.empty()) {
+            return 0.0;
+        }
+
         return pH_[globalDofIdx];
     }
 
@@ -383,7 +429,12 @@ public:
     void serializeOp(Serializer& serializer)
     {
         serializer(concentration_);
+        serializer(Cads_);
+        serializer(Cmin_);
         serializer(pH_);
+        serializer(sigma_);
+        serializer(psi_);
+        serializer(initialEquilibrationDone_);
         serializer(wellSpeciesRate_);
         serializer(mSwSpeciesRate_);
     }
@@ -402,13 +453,17 @@ protected:
         // *BLK
         if (single_species.concentration.has_value()) {
             const auto& species_concentration = single_species.concentration.value();
-            assert(species_concentration.size() == concentration.size());
             if (species_concentration.size() != static_cast<std::size_t>(cartMapper_.cartesianSize())) {
-                throw std::runtime_error("Size of S/M/IBLK" + single_species.name + " is wrong!");
+                throw std::runtime_error("Size of S/M/IBLK " + single_species.name + " is wrong!");
             }
 
-            // Copy *BLK concentrations for each cell to concentration vector
-            std::copy_n(species_concentration.begin(), species_concentration.size(), concentration.begin());
+            // The *BLK concentrations are given for each Cartesian cell, while the concentration
+            // vector has an entry for each active cell
+            for (std::size_t globalDofIdx = 0; globalDofIdx < concentration.size();
+                 ++globalDofIdx) {
+                const int cartDofIdx = cartMapper_.cartesianIndex(globalDofIdx);
+                concentration[globalDofIdx] = species_concentration[cartDofIdx];
+            }
         }
         // *VDP
         else if (single_species.svdp.has_value()) {
@@ -429,7 +484,7 @@ protected:
         else {
             OpmLog::warning(fmt::format("No S/M/IBLK or S/M/IVDP given for species {}. "
                                         "Initial values set to zero. ", single_species.name));
-            std::fill(concentration.begin(), concentration.end(), 0.0);
+            std::ranges::fill(concentration, 0.0);
         }
     }
 
@@ -511,6 +566,48 @@ protected:
     }
 
     /*!
+     * \brief Send the concentrations in the cells owned by this rank to the ranks that have them as
+     *        overlap cells
+     *
+     * \param concentrations Concentration vector for each species
+     *
+     * \note VectorVectorDataHandle.hpp has no include guard, so it is not included here again. It
+     * is included by TracerModel.hpp, which FlowProblem.hpp includes before this file.
+     */
+    void communicateConcentrations_(std::vector<SpeciesVector>& concentrations)
+    {
+        auto handle = VectorVectorDataHandle<GridView, std::vector<SpeciesVector>>(
+            concentrations, simulator_.gridView());
+        simulator_.gridView().communicate(
+            handle, Dune::InteriorBorder_All_Interface, Dune::ForwardCommunication);
+    }
+
+    /*!
+    * \brief Equilibrate the geochemical system in all interior cells with the initial concentrations
+    *
+    * \note Done once, in the first beginTimeStep(), so every cell is equilibrated before any
+    * transport is calculated. Uses the concentrations stored by updateStorageCache().
+    */
+    void initialEquilibration_()
+    {
+        ElementContext elemCtx(simulator_);
+        for (const auto& elem : elements(simulator_.gridView())) {
+            if (elem.partitionType() != Dune::InteriorEntity) {
+                continue;
+            }
+
+            elemCtx.updateStencil(elem);
+            const unsigned I = elemCtx.globalSpaceIndex(/*dofIdx=*/ 0, /*timeIdx=*/0);
+            speciesEquationChemistryExplicit_(/*dt=*/0.0, I, /*initial_equil=*/true);
+        }
+
+        // The overlap cells, which are owned by other ranks, must have the equilibrated values too
+        communicateConcentrations_(concentrationInitial_);
+
+        initialEquilibrationDone_ = true;
+    }
+
+    /*!
     * \brief Run reactive transport solver and post-processing
     *
     * \note The actual reactive transport solver is in speciesEquationsExplicit_()
@@ -522,81 +619,118 @@ protected:
 
         // Post-processing for concentration output
         constexpr Scalar tol_sat = 1e-6;
-        for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-            for (std::size_t globalDofIdx = 0; globalDofIdx < concentration_[sIdx].size(); ++globalDofIdx) {
-                const auto& intQuants = simulator_.model().intensiveQuantities(globalDofIdx, 0);
-                const auto& fs = intQuants.fluidState();
-                const Scalar Sw = decay<Scalar>(fs.saturation(waterPhaseIdx));
+        // Only interior cells are processed, the overlap cells are overwritten by the
+        // communication below.
+        for (const auto globalDofIdx : interiorDofs_) {
+            const auto& intQuants = simulator_.model().intensiveQuantities(globalDofIdx, 0);
+            const auto& fs = intQuants.fluidState();
+            const Scalar Sw = decay<Scalar>(fs.saturation(waterPhaseIdx));
 
+            for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
                 if (concentration_[sIdx][globalDofIdx] < 0.0 || Sw < tol_sat) {
                     concentration_[sIdx][globalDofIdx] = 0.0;
                 }
             }
         }
 
-        // Report produced species
+        // The overlap cells are not calculated here, they get the values from the rank that owns
+        // them. This is needed for the flux terms of the next time step.
+        communicateConcentrations_(concentration_);
+
+        // Correct the reported rates of the producers with cross flow, then convert to raw rates
+        correctCrossFlowRates_();
+        convertEffectiveRatesToRawRates_();
+    }
+
+    /*!
+     * \brief Correct the reported species rates of the producers with cross flow
+     *
+     * If the well rate is larger than the sum of the producing connection rates, some connections
+     * inject. The reported rates are then scaled with the ratio of the well rate to the sum of
+     * the producing rates, or set to zero if the well rate is below a small threshold.
+     */
+    void correctCrossFlowRates_()
+    {
         const auto& wellPtrs = simulator_.problem().wellModel().localNonshutWells();
         for (const auto& wellPtr : wellPtrs) {
             const auto& eclWell = wellPtr->wellEcl();
-
-            // Injection rates already reported in speciesEquationWellExplicit_()
             if (!eclWell.isProducer()) {
                 continue;
             }
 
-            Scalar rateWellPos = 0.0;
-            Scalar rateWellNeg = 0.0;
-            const std::size_t well_index = simulator_.problem().wellModel().wellState().index(eclWell.name()).value();
+            const std::size_t well_index
+                = simulator_.problem().wellModel().wellState().index(eclWell.name()).value();
             const auto& ws = simulator_.problem().wellModel().wellState().well(well_index);
-            auto& speciesRate = wellSpeciesRate_[eclWell.seqIndex()];
-            auto* mswSpeciesRate = eclWell.isMultiSegment() ? &mSwSpeciesRate_[eclWell.seqIndex()] : nullptr;
 
+            Scalar rateWellNeg = 0.0;
             for (std::size_t i = 0; i < ws.perf_data.size(); ++i) {
                 const auto I = ws.perf_data.cell_index[i];
                 const Scalar rate = wellPtr->volumetricSurfaceRateForConnection(I, waterPhaseIdx);
-
                 if (rate < 0.0) {
-                    for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-                        const Scalar delta = rate * concentration_[sIdx][I];
-                        speciesRate[sIdx].rate += delta;
-                        if (eclWell.isMultiSegment()) {
-                            (*mswSpeciesRate)[sIdx].rate[eclWell.getConnections().get(i).segment()]
-                                += delta;
-                        }
-                    }
-                }
-
-                if (rate < 0) {
                     rateWellNeg += rate;
-                } else {
-                    rateWellPos += rate;
                 }
             }
 
-            // TODO: Some inconsistencies here that perhaps should be clarified.
-            // The "offical" rate as reported below is occasionally significant
-            // different from the sum over connections (as calculated above). Only observed
-            // for small values, neglible for the rate itself, but matters when used to
-            // calculate tracer concentrations.
-            // const Scalar official_well_rate_total =
-            //     simulator_.problem().wellModel().wellState().well(well_index).surface_rates[waterPhaseIdx];
+            // TODO: Some inconsistencies here that perhaps should be clarified. The "official" rate
+            // is occasionally significantly different from the sum over connections. Only observed
+            // for small values, negligible for the rate itself, but matters when used to calculate
+            // species concentrations.
+            const Scalar rateWellTotal = ws.surface_rates[waterPhaseIdx];
 
-            // const Scalar rateWellTotal = official_well_rate_total;
-
-            // if (rateWellTotal > rateWellNeg) { // Cross flow
-            //     constexpr Scalar bucketPrDay
-            //         = 10.0 / (1000. * 3600. * 24.); // ... keeps (some) trouble away
-            //     const Scalar factor = (rateWellTotal < -bucketPrDay) ? rateWellTotal / rateWellNeg : 0.0;
-            //     for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-            //         speciesRate[sIdx].rate *= factor;
-            //     }
-            // }
+            // The well rate and the connection rates differ by the tolerance of the well solver
+            // also without cross flow, so a small relative difference is not cross flow.
+            constexpr Scalar crossFlowTolerance = 1.0e-6;
+            if (rateWellTotal - rateWellNeg
+                > crossFlowTolerance * std::abs(rateWellNeg)) { // Cross flow
+                constexpr Scalar bucketPrDay
+                    = 10.0 / (1000. * 3600. * 24.); // ... keeps (some) trouble away
+                const Scalar factor
+                    = (rateWellTotal < -bucketPrDay) ? rateWellTotal / rateWellNeg : 0.0;
+                for (auto& speciesRate : wellSpeciesRate_[eclWell.seqIndex()]) {
+                    speciesRate.rate *= factor;
+                }
+            }
         }
     }
 
     /*!
-    * \brief Reactive transport solver with explicit scheme
-    */
+     * \brief Convert the reported well species rates from effective to raw rates
+     *
+     * The connection rates from the well model include the well efficiency factor, which is right
+     * for the species that are injected and produced in the cells. The reported rates should not
+     * include it.
+     */
+    void convertEffectiveRatesToRawRates_()
+    {
+        const auto& wellPtrs = simulator_.problem().wellModel().localNonshutWells();
+        for (const auto& wellPtr : wellPtrs) {
+            const auto& eclWell = wellPtr->wellEcl();
+            const auto wellSeqIndex = eclWell.seqIndex();
+            const auto invWellEffFactor
+                = 1.0 / std::max<Scalar>(1.0e-10, wellPtr->wellEfficiencyFactor());
+
+            std::ranges::for_each(wellSpeciesRate_[wellSeqIndex], [&](WellTracerRate<Scalar>& wsr) {
+                wsr.rate *= invWellEffFactor;
+            });
+            if (eclWell.isMultiSegment()) {
+                std::ranges::for_each(
+                    mSwSpeciesRate_[wellSeqIndex], [&](MSWellTracerRate<Scalar>& wsr) {
+                        std::ranges::for_each(wsr.rate,
+                                              [&](auto& item) { item.second *= invWellEffFactor; });
+                    });
+            }
+        }
+    }
+
+    /*!
+     * \brief Reactive transport solver with explicit scheme
+     *
+     * The time step is split in as many substeps as needed to keep the Courant number below 1, so
+     * that no cell loses more water than it holds in a substep. The fluxes and well rates are those
+     * of the time step, and the pore volume changes linearly from the old to the new value. Each
+     * substep does the transport and then the chemistry, so the chemistry follows the water as it
+     * moves through the cells. With a Courant number below 1 there is a single substep.
+     */
     void speciesEquationsExplicit_()
     {
         // Clear well containers
@@ -606,89 +740,241 @@ protected:
         // Reserve new space
         const auto& wellPtrs = simulator_.problem().wellModel().localNonshutWells();
         wellSpeciesRate_.reserve(wellPtrs.size());
-        mSwSpeciesRate_.reserve(mSwSpeciesRate_.size());
+        mSwSpeciesRate_.reserve(wellPtrs.size());
 
         // Simulator information
         ElementContext elemCtx(simulator_);
         const Scalar dt = elemCtx.simulator().timeStepSize();
 
-        // Initialize current species concentrations to zero
-        for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-            concentration_[sIdx] = 0.0;
-        }
-
-        // Calculate well terms
+        // Calculate well terms. The perforations of a rank are only in its interior cells.
+        wellSources_.clear();
+        producerConnections_.clear();
         for (const auto& wellPtr : wellPtrs) {
-            speciesEquationWellExplicit_(*wellPtr, dt);
+            speciesEquationWellExplicit_(*wellPtr);
         }
 
-        // Loop over grid blocks and calculate new concentrations for each species
-        for (const auto& elem : elements(simulator_.gridView())) {
-            elemCtx.updateStencil(elem);
-            const std::size_t I = elemCtx.globalSpaceIndex(/*dofIdx=*/ 0, /*timeIdx=*/0);
+        // Quantities that are constant during the time step
+        prepareTransportExplicit_(elemCtx);
 
-            // Dirichlet BC
+        // Transport from the concentrations at the start of the time step
+        for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
+            concentration_[sIdx] = concentrationInitial_[sIdx];
+        }
+        const int numSubsteps = numberOfSubsteps_(dt);
+        for (int substep = 0; substep < numSubsteps; ++substep) {
+            transportSubstepExplicit_(substep, numSubsteps, dt / numSubsteps);
+
+            // Equilibrate geochemical system
+            for (const auto I : interiorDofs_) {
+                speciesEquationChemistryExplicit_(dt / numSubsteps, I);
+            }
+            communicateConcentrations_(concentration_);
+        }
+    }
+
+    /*!
+     * \brief Calculate the quantities of the interior cells that are constant during a time step
+     *
+     * \param elemCtx Reference to element context object
+     */
+    void prepareTransportExplicit_(ElementContext& elemCtx)
+    {
+        interiorDofs_.clear();
+        for (const auto& elem : elements(simulator_.gridView())) {
             if (elem.partitionType() != Dune::InteriorEntity) {
-                for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-                    concentration_[sIdx][I] = 0.0;
-                }
                 continue;
             }
+
+            elemCtx.updateStencil(elem);
+            const unsigned I = elemCtx.globalSpaceIndex(/*dofIdx=*/0, /*timeIdx=*/0);
+            interiorDofs_.push_back(I);
 
             // Update block quantities
             elemCtx.updateAllIntensiveQuantities();
             elemCtx.updateAllExtensiveQuantities();
 
             // Volume at current time step
-            const Scalar extrusionFactor =
-                elemCtx.intensiveQuantities(/*dofIdx=*/ 0, /*timeIdx=*/0).extrusionFactor();
+            const Scalar extrusionFactor
+                = elemCtx.intensiveQuantities(/*dofIdx=*/0, /*timeIdx=*/0).extrusionFactor();
             Valgrind::CheckDefined(extrusionFactor);
             assert(isfinite(extrusionFactor));
             assert(extrusionFactor > 0.0);
-            const Scalar scvVolume =
-                elemCtx.stencil(/*timeIdx=*/0).subControlVolume(/*dofIdx=*/ 0).volume() * extrusionFactor;
-            const Scalar vol = computeVolume_(I, 0);
-            const Scalar vol0 = vol * scvVolume;
+            const Scalar scvVolume
+                = elemCtx.stencil(/*timeIdx=*/0).subControlVolume(/*dofIdx=*/0).volume()
+                * extrusionFactor;
+            volumeNew_[I] = computeVolume_(I, 0) * scvVolume;
 
-            // At simulation time == 0.0, equilibrate geochemical system
-            if (initial_equil_[I]) {
-                speciesEquationChemistryExplicit_(dt, I, initial_equil_[I]);
-                initial_equil_[I] = false;
-            }
-
-            // Calculate volume/storage term
-            speciesEquationVolumeExplicit_(I);
-
-            // Calculate flux term
+            // Fluxes over the faces to the neighbour cells
+            faceFluxes_[I].clear();
             const std::size_t numInteriorFaces = elemCtx.numInteriorFaces(/*timIdx=*/0);
             for (unsigned scvfIdx = 0; scvfIdx < numInteriorFaces; scvfIdx++) {
-                // Get neighbour global index
                 const auto& face = elemCtx.stencil(0).interiorFace(scvfIdx);
                 const unsigned j = face.exteriorIndex();
-                const unsigned J = elemCtx.globalSpaceIndex(/*dofIdx=*/ j, /*timIdx=*/0);
-
-                // Flux term between I and J
-                speciesEquationFluxExplicit_(elemCtx, scvfIdx, I, J, dt);
+                const unsigned J = elemCtx.globalSpaceIndex(/*dofIdx=*/j, /*timIdx=*/0);
+                const auto& [flux, isUp] = computeFlux_(elemCtx, scvfIdx, 0);
+                faceFluxes_[I].push_back({J, flux, isUp});
             }
-
-            // Divide all terms with current volume (necessary in explicit scheme)
-            for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-                concentration_[sIdx][I] /= vol0;
-            }
-
-            // Equilibrate geochemical system
-            speciesEquationChemistryExplicit_(dt, I);
         }
     }
 
     /*!
-    * \brief Calculate single well contribution in explicit reactive transport solver
+     * \brief Number of transport substeps needed to keep the Courant number below the target
+     *
+     * The Courant number of a cell is the water that leaves the cell in the time step (over its
+     * faces and through wells) divided by the water the cell holds. The substeps are as few as
+     * needed to keep the Courant number of each cell below the target Courant number. All ranks
+     * must use the same number, as the overlap cells are communicated in each substep.
+     *
+     * \param dt Time step
+     * \returns Number of substeps
+     */
+    int numberOfSubsteps_(const Scalar dt) const
+    {
+        // Water leaving the cell over its faces and through its wells, divided by its water volume
+        // and by the target Courant number, so a value of one means that the cell is at the target
+        auto courantRatio = [this, dt](const unsigned I, const Scalar wellOutflow) {
+            Scalar outflow = wellOutflow;
+            for (const auto& face : faceFluxes_[I]) {
+                outflow += std::max<Scalar>(face.flux, 0);
+            }
+            return dt * outflow / (param_.target_cfl_ * std::min(vol1_[I], volumeNew_[I]));
+        };
+
+        Scalar maxCourantRatio = 0.0;
+        for (const auto I : interiorDofs_) {
+            maxCourantRatio = std::max(maxCourantRatio, courantRatio(I, 0));
+        }
+        for (const auto& [I, source] : wellSources_) {
+            maxCourantRatio = std::max(
+                maxCourantRatio, courantRatio(I, std::max<Scalar>(-source.waterProductionRate, 0)));
+        }
+
+        // All ranks must use the same number of substeps
+        maxCourantRatio = simulator_.gridView().comm().max(maxCourantRatio);
+
+        // Compare as Scalar, as converting a value above INT_MAX to int is undefined
+        const Scalar neededSubsteps = std::ceil(maxCourantRatio);
+        int numSubsteps = 1;
+        if (neededSubsteps > static_cast<Scalar>(maxNumSubsteps)) {
+            OpmLog::warning(
+                fmt::format("The geochemistry transport needs {:.3g} substeps in a time step "
+                            "of {} s, but is limited to {}. Concentrations can become "
+                            "negative and are then set to zero. Reduce the time step.",
+                            neededSubsteps,
+                            dt,
+                            maxNumSubsteps));
+            numSubsteps = maxNumSubsteps;
+        } else {
+            numSubsteps = std::max(1, static_cast<int>(neededSubsteps));
+            if (numSubsteps > 1) {
+                OpmLog::debug(
+                    fmt::format("Geochemistry transport uses {} substeps in a time step of {} s",
+                                numSubsteps,
+                                dt));
+            }
+        }
+        return numSubsteps;
+    }
+
+    /*!
+     * \brief One explicit upwind substep of the transport of the species
+     *
+     * \param substep Index of the substep
+     * \param numSubsteps Number of substeps
+     * \param dtSubstep Length of the substep
+     */
+    void transportSubstepExplicit_(const int substep, const int numSubsteps, const Scalar dtSubstep)
+    {
+        // Volume and flux terms
+        const Scalar fractionStart = static_cast<Scalar>(substep) / numSubsteps;
+        const Scalar fractionEnd = static_cast<Scalar>(substep + 1) / numSubsteps;
+        for (const auto I : interiorDofs_) {
+            // Volumes at start and end of substep (linear fraction of total volume change)
+            const Scalar volumeStart = vol1_[I] + fractionStart * (volumeNew_[I] - vol1_[I]);
+            const Scalar volumeEnd = vol1_[I] + fractionEnd * (volumeNew_[I] - vol1_[I]);
+            for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
+                // Amount at the start and the fluxes from the concentrations at the start
+                Scalar amount = volumeStart * concentration_[sIdx][I];
+                for (const auto& face : faceFluxes_[I]) {
+                    const unsigned upstream = face.isUp ? I : face.neighbour;
+                    amount -= dtSubstep * face.flux * concentration_[sIdx][upstream];
+                }
+                concentrationNext_[sIdx][I] = amount / volumeEnd;
+            }
+        }
+
+        // Injection/production from wells (loop only over well cells)
+        for (const auto& [I, source] : wellSources_) {
+            const Scalar volumeEnd = vol1_[I] + fractionEnd * (volumeNew_[I] - vol1_[I]);
+            for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
+                const Scalar rate = source.speciesInjectionRate[sIdx]
+                    + source.waterProductionRate * concentration_[sIdx][I];
+                concentrationNext_[sIdx][I] += dtSubstep * rate / volumeEnd;
+            }
+        }
+
+        // Report the species produced by the producers, which is the amount removed above, averaged
+        // over the time step. The concentrations are still those at the start of the substep.
+        const Scalar substepWeight = 1.0 / numSubsteps;
+        for (const auto& connection : producerConnections_) {
+            auto& speciesRate = wellSpeciesRate_[connection.wellSeqIndex];
+            for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
+                const Scalar delta
+                    = substepWeight * connection.rate * concentration_[sIdx][connection.cell];
+                speciesRate[sIdx].rate += delta;
+                if (connection.segment >= 0) {
+                    mSwSpeciesRate_[connection.wellSeqIndex][sIdx].rate[connection.segment]
+                        += delta;
+                }
+            }
+        }
+
+        // All cells are updated from the concentrations at the start, then the new values are used
+        for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
+            for (const auto I : interiorDofs_) {
+                concentration_[sIdx][I] = concentrationNext_[sIdx][I];
+            }
+        }
+    }
+
+    /*!
+    * \brief Get WSPECIES for a particular species
     *
-    * \param well Reference to well object
-    * \param dt Time step
+    * \param eclWell Reference to eclWell object
+    * \param name Name of species
+    * \param summaryState SummaryState object
+    * \returns Concentration of injected species
     */
+    Scalar currentWSPECIES_(const Well& eclWell, const std::string& name, const SummaryState& summaryState) const
+    {
+        return eclWell.getSpeciesProperties().getConcentration(WellTracerProperties::Well { eclWell.name() },
+                                                               WellTracerProperties::Tracer { name },
+                                                               summaryState);
+    }
+
+    /*!
+     * \brief Get the well source of a cell, which is created if the cell has none yet
+     *
+     * \param I Cell index
+     */
+    WellSource& getWellSource_(const unsigned I)
+    {
+        auto& source = wellSources_[I];
+        if (source.speciesInjectionRate.empty()) {
+            source.speciesInjectionRate.assign(numSpecies(), 0);
+        }
+        return source;
+    }
+
+    /*!
+     * \brief Calculate single well contribution in explicit reactive transport solver
+     *
+     * The rates are per time. They are used in each transport substep.
+     *
+     * \param well Reference to well object
+     */
     template <class Well>
-    void speciesEquationWellExplicit_(const Well& well, const Scalar& dt)
+    void speciesEquationWellExplicit_(const Well& well)
     {
         // Get simulation wells
         const auto& eclWell = well.wellEcl();
@@ -696,7 +982,8 @@ protected:
         // Reserve space for species output
         auto& speciesRate = wellSpeciesRate_[eclWell.seqIndex()];
         speciesRate.reserve(numSpecies());
-        auto* mswSpeciesRate = eclWell.isMultiSegment()
+        const bool isMsw = eclWell.isMultiSegment();
+        auto* mswSpeciesRate = isMsw
             ? &mSwSpeciesRate_[eclWell.seqIndex()]
             : nullptr;
         if (mswSpeciesRate) {
@@ -706,7 +993,7 @@ protected:
         // Init. well output to zero
         for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
             speciesRate.emplace_back(speciesName(sIdx), 0.0);
-            if (eclWell.isMultiSegment()) {
+            if (isMsw) {
                 auto& wsr = mswSpeciesRate->emplace_back(speciesName(sIdx));
                 wsr.rate.reserve(eclWell.getConnections().size());
                 for (std::size_t i = 0; i < eclWell.getConnections().size(); ++i) {
@@ -731,64 +1018,38 @@ protected:
 
             // Injection
             if (rate > 0.0) {
+                auto& source = getWellSource_(I);
                 for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
                     // Inject WSPECIES concentration
                     const Scalar inj_species_rate = rate * wspecies[sIdx];
-                    concentration_[sIdx][I] += dt * inj_species_rate;
+                    source.speciesInjectionRate[sIdx] += inj_species_rate;
 
                     // Store for reporting here because WSPECIES is constant over time step
                     speciesRate[sIdx].rate += inj_species_rate;
-                    if (eclWell.isMultiSegment()) {
+                    if (isMsw) {
                         (*mswSpeciesRate)[sIdx].rate[eclWell.getConnections().get(i).segment()] += inj_species_rate;
                     }
                 }
             }
             // Production
-            // OBS: storing well rates for reporting done in advanceSpeciesFieldsExplicit_()
+            // OBS: storing well rates for reporting done in transportSubstepExplicit_()
             else if (rate < 0.0) {
-                for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-                    // Produce tracer concentration
-                    concentration_[sIdx][I] += dt * rate * concentrationInitial_[sIdx][I];
+                // The species are produced with the concentration of the cell
+                getWellSource_(I).waterProductionRate += rate;
+                if (eclWell.isProducer()) {
+                    producerConnections_.push_back(
+                        {eclWell.seqIndex(),
+                         I,
+                         rate,
+                         isMsw ? eclWell.getConnections().get(i).segment() : -1});
+                }
 
+                for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
                     // Ensure reporting of cross-flow
                     const Scalar inj_species_rate = rate * wspecies[sIdx];
                     speciesRate[sIdx].rate += inj_species_rate;
                 }
             }
-        }
-    }
-
-    /*!
-    * \brief Volume term in explicit reactive transport solver
-    *
-    * \param I Grid cell index
-    */
-    void speciesEquationVolumeExplicit_(unsigned I)
-    {
-        for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-            concentration_[sIdx][I] += vol1_[I] * concentrationInitial_[sIdx][I];
-        }
-    }
-
-    /*!
-    * \brief Flux term in explicit reactive transport solver
-    *
-    * \param elemCtx Reference to element context object
-    * \param scvfIdx (Local) control volume index
-    * \param I Index of focused cell
-    * \param J Index of neighbor cell to I
-    * \param dt Time step
-    */
-    void speciesEquationFluxExplicit_(const ElementContext& elemCtx,
-                                      unsigned scvfIdx,
-                                      unsigned I,
-                                      unsigned J,
-                                      const Scalar dt)
-    {
-        const auto& [flux, isUp] = computeFlux_(elemCtx, scvfIdx, 0);
-        const int globalUpIdx = isUp ? I : J;
-        for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-            concentration_[sIdx][I] -= dt * flux * concentrationInitial_[sIdx][globalUpIdx];
         }
     }
 
@@ -915,7 +1176,7 @@ protected:
                                        sigma,
                                        psi);
 
-        // Update mineral concentarations
+        // Update mineral concentrations
         if (nMin > 0) {
             for (std::size_t l = 0; l < nMin; ++l) {
                 Cmin_[l][I] += Cmin[l];
@@ -951,10 +1212,18 @@ private:
     std::vector<double> pH_;
     std::vector<double> sigma_;
     std::vector<double> psi_;
-    std::vector<bool> initial_equil_;
     std::vector<Scalar> vol1_;
+    bool initialEquilibrationDone_{false};
+
+    std::vector<unsigned> interiorDofs_;
+    std::vector<std::vector<FaceFlux>> faceFluxes_;
+    std::vector<Scalar> volumeNew_;
+    std::unordered_map<unsigned, WellSource> wellSources_;
+    std::vector<ProducerConnection> producerConnections_;
+    std::vector<SpeciesVector> concentrationNext_;
     std::vector<std::string> speciesNames_;
     std::vector<std::string> mineralNames_;
+    std::vector<std::size_t> deckToSolverMineral_;
     std::vector<std::string> ionExNames_;
 
     std::shared_ptr<OpmGeoChemInterface> geoChemInterface_;
@@ -966,6 +1235,7 @@ private:
     const EclipseState& eclState_;
     const CartesianIndexMapper& cartMapper_;
     ElementChunks<GridView, Dune::Partitions::All> element_chunks_;
+    GeochemistryModelParameters<Scalar> param_;
 };  // class GeochemistryModel
 } // namespace Opm
 

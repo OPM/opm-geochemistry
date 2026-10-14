@@ -605,7 +605,7 @@ void InitChem::initialize_vectors(int max_size)
 
 void InitChem::reorder_species(const std::vector<std::string>& speciesNamesInOrder)
 {
-    if(vector_has_duplicates(speciesNamesInOrder))
+    if(vector_has_duplicates(to_lower_case(speciesNamesInOrder)))
     {
         fmt::print("InitChem::reorder_species(): Input vector of names has duplicates, do nothing...\n.");
         return;

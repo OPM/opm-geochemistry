@@ -23,13 +23,15 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <fstream>
+#include <map>
 #include <stdexcept>
 
 namespace {
 
 // Print warning helper
-auto printWarning (const std::string& file_name, const std::string& block, const char* keyword, bool ignore)
+void printWarning (const std::string& file_name, const std::string& block, const char* keyword, bool ignore)
 {
     std::string msg;
     if (ignore) {
@@ -41,7 +43,7 @@ auto printWarning (const std::string& file_name, const std::string& block, const
                             block, file_name, keyword);
     }
     Opm::OpmLog::warning(msg);
-};
+}
 
 }
 
@@ -49,9 +51,9 @@ auto printWarning (const std::string& file_name, const std::string& block, const
 // PUBLIC METHODS
 // ///
 void OpmGeoChemInterface::initialize_from_opm_deck(const std::string& file_name,
-                                                   const std::vector<std::string> species,
-                                                   const std::vector<std::string> minerals,
-                                                   const std::vector<std::string> ion_ex,
+                                                   const std::vector<std::string>& species,
+                                                   const std::vector<std::string>& minerals,
+                                                   const std::vector<std::string>& ion_ex,
                                                    bool charge_balance,
                                                    std::pair<double, double> tol,
                                                    int splay_tree_resolution)
@@ -60,17 +62,18 @@ void OpmGeoChemInterface::initialize_from_opm_deck(const std::string& file_name,
     nlohmann::json appended_json = opmDeckSpeciesToJSON_(file_name, charge_balance, species, minerals, ion_ex);
 
     // Parse JSON
-    auto json_parsed = geoChemPhases_.resetFromJson(appended_json.dump());
+    const std::string json_string = appended_json.dump();
+    auto json_parsed = geoChemPhases_.resetFromJson(json_string);
     std::map<GeochemicalPhaseType, GeoChemPhaseData> phases_to_be_used;
     const int max_size = geoChemPhases_.selectPhases(geoChemPhases_.getPhaseNamesAndTypes(), phases_to_be_used);
-    set_geochemical_database_modifications_from_json(appended_json.dump());
+    set_geochemical_database_modifications_from_json(json_string);
 
     // Init.
     ICS_full_ = InitChem::create_from_input_data(nullptr,
                                                  db_changes_made_by_user_,
                                                  phases_to_be_used,
                                                  max_size,
-                                                 "TESTING",
+                                                 "GEOCHEM",
                                                  species,
                                                  splay_tree_resolution);
     allocate_memory_for_solver_and_splay_tree_etc();
@@ -86,7 +89,7 @@ void OpmGeoChemInterface::initialize_from_opm_deck(const std::string& file_name,
 }
 
 void OpmGeoChemInterface::initialize_json(const std::string& file_name,
-                                          const std::vector<std::string> user_order)
+                                          const std::vector<std::string>& user_order)
 {
     // Read input from JSON file
     auto json_parsed = geoChemPhases_.resetFromJson(file_name);
@@ -99,7 +102,7 @@ void OpmGeoChemInterface::initialize_json(const std::string& file_name,
                                                  db_changes_made_by_user,
                                                  phases_to_be_used,
                                                  max_size,
-                                                 "TESTING",
+                                                 "GEOCHEM",
                                                  user_order,
                                                  0);
     allocate_memory_for_solver_and_splay_tree_etc();
@@ -116,7 +119,7 @@ void OpmGeoChemInterface::initialize_json(const std::string& file_name,
 void OpmGeoChemInterface::initialize(const std::string& file_name,
                                      double temperature,
                                      double porosity,
-                                     const std::vector<std::string> user_order)
+                                     const std::vector<std::string>& user_order)
 {
     if (ICS_full_) throw MultipleInitializationException("Cannot initialize ICS_full_, it already exists...");
 
@@ -154,11 +157,44 @@ void OpmGeoChemInterface::initialize(const std::string& file_name,
     }
 }
 
+std::vector<std::size_t>
+OpmGeoChemInterface::mineral_index_map(const std::vector<std::string>& deck_minerals) const
+{
+    std::vector<std::size_t> map;
+    map.reserve(deck_minerals.size());
+    std::vector<bool> used(ICS_full_->size_min_, false);
+    for (const auto& name : deck_minerals) {
+        const int idx = ICS_full_->get_mineral_index(name);
+        if (idx < 0) {
+            const std::string msg
+                = fmt::format("MINERAL: {} not found in the geochemistry solver.", name);
+            Opm::OpmLog::error(msg);
+            throw std::runtime_error(msg);
+        }
+        if (used[idx]) {
+            const std::string msg = fmt::format("MINERAL: duplicate {}.", name);
+            Opm::OpmLog::error(msg);
+            throw std::runtime_error(msg);
+        }
+        used[idx] = true;
+        map.push_back(static_cast<std::size_t>(idx));
+    }
+    return map;
+}
+
 void OpmGeoChemInterface::calculate_initial_mineral_concentration(std::vector<double>& Cmin,
                                                                   double porosity,
-                                                                  std::unordered_map<std::string, double> weight_mineral)
+                                                                  const std::unordered_map<std::string, double>& weight_mineral)
 {
-    assert(weight_mineral.size() == static_cast<std::size_t>(ICS_full_->size_min_));
+    if (weight_mineral.size() != static_cast<std::size_t>(ICS_full_->size_min_)) {
+        const std::string msg
+            = fmt::format("Weight fractions are given for {} minerals, but the geochemistry solver "
+                          "has {}.",
+                          weight_mineral.size(),
+                          ICS_full_->size_min_);
+        Opm::OpmLog::error(msg);
+        throw std::runtime_error(msg);
+    }
 
     for (const auto& [name, val] : weight_mineral) {
         int minIdx = ICS_full_->get_mineral_index(name);
@@ -195,10 +231,18 @@ void OpmGeoChemInterface::calculate_initial_mineral_concentration(std::vector<do
 void OpmGeoChemInterface::set_surface_concentrations(double swat,
                                                      std::vector<double>& C_tot,
                                                      double& frac_DL,
-                                                     std::unordered_map<std::string, double> C_io)
+                                                     const std::unordered_map<std::string, double>& C_io)
 {
     // Set ion exchange concentration
-    assert(C_io.size() == static_cast<std::size_t>(ICS_full_->size_io_));
+    if (C_io.size() != static_cast<std::size_t>(ICS_full_->size_io_)) {
+        const std::string msg
+            = fmt::format("Concentrations are given for {} ion exchange species, but the "
+                          "geochemistry solver has {}.",
+                          C_io.size(),
+                          ICS_full_->size_io_);
+        Opm::OpmLog::error(msg);
+        throw std::runtime_error(msg);
+    }
 
     for (int i = 0; i < ICS_full_->size_io_; ++i) {
         const auto& name = ICS_full_->io_name_[i];
@@ -216,63 +260,20 @@ void OpmGeoChemInterface::set_solver_tolerances(GCSolver& GCS_in,
     GCS_in.options_.PH_CONV_CRITERION_ = ph_tol;
 }
 
-std::vector<double>& OpmGeoChemInterface::get_log_a_mineral() const
+std::vector<double>& OpmGeoChemInterface::get_log_a_mineral()
+{ return ICS_full_->log_a_mineral_; }
+
+const std::vector<double>& OpmGeoChemInterface::get_log_a_mineral() const
 { return ICS_full_->log_a_mineral_; }
 
 // ////
 // PRIVATE METHODS
 // ///
-nlohmann::json OpmGeoChemInterface::appendUserSpeciesToJSON_(const std::string& file_name,
-                                                             const std::vector<std::string> species_names)
-{
-    nlohmann::json json_parsed;
-    try {
-        std::ifstream file(file_name);
-        if (file.good()) {
-            std::ifstream in(file_name);
-            if (!in) {
-                throw std::runtime_error("Could not open JSON file: " + file_name);
-            }
-            in >> json_parsed;
-        } else {
-            // Fallback: parse as raw JSON string
-            json_parsed = nlohmann::json::parse(file_name);
-        }
-    }
-    catch (const nlohmann::json::parse_error& e) {
-        std::cerr << "JSON parse error in appendUserSpeciesToJSON_: " << e.what() << std::endl;
-    }
-
-    // Make sure there is an aqueous solution section in the JSON file
-    const std::string solution_section = PhaseKeyword(GeochemicalPhaseType::AQUEOUS_SOLUTION);
-    if (!json_parsed.contains(solution_section)) {
-        json_parsed[solution_section] = nlohmann::json::object();
-    }
-
-    if (!json_parsed[solution_section].contains(solution_section + " 0")) {
-        json_parsed[solution_section][solution_section + " 0"] = nlohmann::json::object();
-    }
-
-    // Append species names with an (arbitrary) initial concentration
-    for (const auto& species : species_names) {
-        // Skip species already in JSON file
-        if (json_parsed[solution_section][solution_section + " 0"].contains(species)) {
-            continue;
-        }
-
-        // Generate key-value block for species
-        // TODO: H with charge
-        json_parsed[solution_section][solution_section + " 0"][species] = "1e-12";
-    }
-
-    return json_parsed;
-}
-
 nlohmann::json OpmGeoChemInterface::opmDeckSpeciesToJSON_(const std::string& file_name,
                                                           bool charge_balance,
-                                                          const std::vector<std::string> species,
-                                                          const std::vector<std::string> minerals,
-                                                          const std::vector<std::string> ion_ex)
+                                                          const std::vector<std::string>& species,
+                                                          const std::vector<std::string>& minerals,
+                                                          const std::vector<std::string>& ion_ex)
 {
     // SPECIES keyword required!
     if (species.empty()) {
@@ -299,7 +300,7 @@ nlohmann::json OpmGeoChemInterface::opmDeckSpeciesToJSON_(const std::string& fil
         printWarning(file_name, solution_block, "SPECIES", /*ignore=*/false);
     }
     json_opm[solution_block] = nlohmann::json::object();
-    json_opm[solution_block][solution_block + "0"] = nlohmann::json::object();
+    json_opm[solution_block][solution_block + " 0"] = nlohmann::json::object();
     for (const auto& elem : species) {
         if (elem == "H" && charge_balance) {
             json_opm[solution_block][solution_block + " 0"][elem] = "1.0 charge";
@@ -351,49 +352,108 @@ nlohmann::json OpmGeoChemInterface::opmDeckSpeciesToJSON_(const std::string& fil
     return json_opm;
 }
 
-void OpmGeoChemInterface::checkUserOrder_(const std::vector<std::string> user_order,
-                                          std::optional<std::string> file_name)
+void OpmGeoChemInterface::checkUserOrder_(const std::vector<std::string>& user_order,
+                                          const std::optional<std::string>& file_name)
 {
-    int user_order_size = static_cast<int>(user_order.size());
-    if (ICS_full_->size_aq_ != user_order_size){
-        std::string msg;
-        std::vector<std::string> species_not_present;
-        bool add_or_remove;
-        if (ICS_full_->size_aq_ > user_order_size) {
-            for (int i = 0; i < ICS_full_->size_aq_; ++i) {
-                const auto basis_name = ICS_full_->basis_species_name_[i];
-                int pos_in_db = ICS_full_->SM_basis_->get_row_index(basis_name);
-                const auto internal_name = to_upper_case(ICS_full_->SM_basis_->nick_name_[pos_in_db]);
-                const auto it = std::find(user_order.begin(), user_order.end(), internal_name);
-                if (it == user_order.end()) {
-                    species_not_present.push_back(internal_name);
-                }
-            }
-            add_or_remove = true;
+    const auto& basis = *ICS_full_->SM_basis_;
+
+    auto join = [](const std::vector<std::string>& names) {
+        std::string joined;
+        for (const auto& name : names) {
+            joined += (joined.empty() ? "" : " ") + name;
         }
-        else {
-            for (int i = 0; i < user_order_size; ++i) {
-                const auto user_species = user_order[i];
-                if (ICS_full_->SM_basis_->get_row_index(user_species) < 0) {
-                    species_not_present.push_back(user_species);
-                }
-            }
-            add_or_remove = false;
+        return joined;
+    };
+
+    // Names used in the messages. In the OPM deck the species are given by the SPECIES keyword and
+    // the geochemistry solver is built from the deck. When a JSON input is given, the species list
+    // is passed in separately and the geochemistry solver's species come from the JSON input. This
+    // is either the path of a file, which is shown, or the JSON text itself, which can be long.
+    const bool has_file = file_name.has_value();
+    const std::string species_list = has_file ? "Species list" : "SPECIES";
+    const std::string solver_source = [&]() -> std::string {
+        if (!has_file) {
+            return "the geochemistry solver";
         }
-        if (file_name.has_value()) {
-            msg = fmt::format("The following species must be {} SPECIES or {} \"{}\": ",
-                              add_or_remove ? "added to" : "removed from",
-                              add_or_remove ? "removed from" : "added to",
-                              *file_name);
+        const auto first = file_name->find_first_not_of(" \t\r\n");
+        const bool is_json_text = first != std::string::npos && (*file_name)[first] == '{';
+        return is_json_text ? "the JSON input" : fmt::format("\"{}\"", *file_name);
+    }();
+
+    // Database rows of the species in SPECIES. Names are looked up in the database, so a nickname
+    // and the full name of the same species (e.g. NA and Na+), or different capitalisation, give
+    // the same row. A species given more than once is an error in SPECIES that the geochemistry
+    // solver cannot resolve: it either ends up with a different number of species or with one
+    // species twice.
+    std::vector<std::string> duplicates;
+    std::vector<int> user_rows;
+    user_rows.reserve(user_order.size());
+    for (const auto& name : user_order) {
+        const int row = basis.get_row_index(name);
+        const auto earlier = std::ranges::find(user_rows, row);
+        if (row >= 0 && earlier != user_rows.end()) {
+            duplicates.push_back(fmt::format(
+                "{} (same species as {})", name, user_order[earlier - user_rows.begin()]));
         }
-        else {
-            msg = fmt::format("The following species must be {} SPECIES : ",
-                                add_or_remove ? "added to" : "removed from");
-        }
-        for (const auto& elem : species_not_present) {
-            msg += fmt::format("{} ", elem);
-        }
-        Opm::OpmLog::error(msg);
-        throw std::runtime_error(msg);
+        user_rows.push_back(row);
     }
+
+    // Database rows of the species of the geochemistry solver, and the species that it has but
+    // SPECIES does not (e.g. required by a mineral)
+    std::vector<int> solver_rows;
+    solver_rows.reserve(ICS_full_->size_aq_);
+    std::vector<std::string> added_by_solver;
+    for (int i = 0; i < ICS_full_->size_aq_; ++i) {
+        const int solver_row = basis.get_row_index(ICS_full_->basis_species_name_[i]);
+        solver_rows.push_back(solver_row);
+        if (std::ranges::find(user_rows, solver_row) == user_rows.end()) {
+            added_by_solver.push_back(ICS_full_->basis_species_name_[i]);
+        }
+    }
+
+    // Species in SPECIES that the geochemistry solver does not have: either unknown in the
+    // database, or known but not among the species of the geochemistry solver
+    std::vector<std::string> not_in_solver;
+    for (std::size_t i = 0; i < user_order.size(); ++i) {
+        if (user_rows[i] < 0 || std::ranges::find(solver_rows, user_rows[i]) == solver_rows.end()) {
+            not_in_solver.push_back(user_order[i]);
+        }
+    }
+
+    // The species must be the same as in the geochemistry solver, and in the same order as the
+    // concentrations are mapped to the geochemistry solver species index. Everything that is
+    // wrong is reported at once.
+    const bool same_species = duplicates.empty() && added_by_solver.empty() && not_in_solver.empty();
+    if (same_species && user_rows == solver_rows) {
+        return;
+    }
+
+    std::vector<std::string> lines;
+    if (!duplicates.empty()) {
+        lines.push_back(fmt::format("{}: duplicate {}.", species_list, join(duplicates)));
+    }
+    if (!not_in_solver.empty()) {
+        lines.push_back(fmt::format(
+            "{}: remove {}, not in {}.", species_list, join(not_in_solver), solver_source));
+    }
+    if (!added_by_solver.empty()) {
+        lines.push_back(fmt::format(
+            "{}: add {}, required by {}.", species_list, join(added_by_solver), solver_source));
+    }
+    if (same_species) {
+        const std::vector<std::string> solver_species(ICS_full_->basis_species_name_.begin(),
+                                                      ICS_full_->basis_species_name_.begin()
+                                                          + ICS_full_->size_aq_);
+        lines.push_back(fmt::format("{}: order differs from {}: {} vs {}.",
+                                    species_list,
+                                    solver_source,
+                                    join(user_order),
+                                    join(solver_species)));
+    }
+    std::string msg;
+    for (const auto& line : lines) {
+        msg += (msg.empty() ? "" : "\n") + line;
+    }
+    Opm::OpmLog::error(msg);
+    throw std::runtime_error(msg);
 }

@@ -16,7 +16,7 @@
   You should have received a copy of the GNU General Public License
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include <config.h>
+#include "config.h"
 
 #include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
@@ -52,7 +52,7 @@ namespace Opm::Properties {
         using type = FlowProblemGeochemistry<TypeTag>;
     };
 
-}  // namspace Opm::Properties
+}  // namespace Opm::Properties
 
 int main(int argc, char** argv)
 {
