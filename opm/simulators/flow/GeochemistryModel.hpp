@@ -73,6 +73,8 @@ class GeochemistryModel
     enum { waterPhaseIdx = FluidSystem::waterPhaseIdx };
 
     static constexpr int maxNumSubsteps = 100;
+    static constexpr Scalar tolSat = 1e-6; //!< Water saturation below which a cell is dry
+    static constexpr Scalar minSatInitial = 0.1; //!< Minimum water saturation of initial solve
 
     struct WellSource
     {
@@ -618,7 +620,6 @@ protected:
         speciesEquationsExplicit_();
 
         // Post-processing for concentration output
-        constexpr Scalar tol_sat = 1e-6;
         // Only interior cells are processed, the overlap cells are overwritten by the
         // communication below.
         for (const auto globalDofIdx : interiorDofs_) {
@@ -627,7 +628,7 @@ protected:
             const Scalar Sw = decay<Scalar>(fs.saturation(waterPhaseIdx));
 
             for (std::size_t sIdx = 0; sIdx < numSpecies(); ++sIdx) {
-                if (concentration_[sIdx][globalDofIdx] < 0.0 || Sw < tol_sat) {
+                if (concentration_[sIdx][globalDofIdx] < 0.0 || Sw < tolSat) {
                     concentration_[sIdx][globalDofIdx] = 0.0;
                 }
             }
@@ -765,8 +766,10 @@ protected:
             transportSubstepExplicit_(substep, numSubsteps, dt / numSubsteps);
 
             // Equilibrate geochemical system
+            const Scalar substepFraction = static_cast<Scalar>(substep + 1) / numSubsteps;
             for (const auto I : interiorDofs_) {
-                speciesEquationChemistryExplicit_(dt / numSubsteps, I);
+                speciesEquationChemistryExplicit_(dt / numSubsteps, I, /*initial_equil=*/false,
+                                                  substepFraction);
             }
             communicateConcentrations_(concentration_);
         }
@@ -1059,15 +1062,34 @@ protected:
     * \param dt Time step
     * \param I Cell index
     * \param initial_equil Optional bool indicating if this is an initial equilibrium solve
+    * \param substepFraction Optional fraction of the time step at the end of the transport substep
     */
     void speciesEquationChemistryExplicit_(Scalar dt,
                                            unsigned I,
-                                           bool initial_equil = false)
+                                           bool initial_equil = false,
+                                           Scalar substepFraction = 1.0)
     {
         // Ensure that dt == 0 for initial equilibration
         const double dt_geochem = initial_equil ? 0.0 : dt;
 
         // Initialize total and adsorbed concentrations before equilibration
+        const auto& intQuants = simulator_.model().intensiveQuantities(I, 0);
+        const auto& fs = intQuants.fluidState();
+        double swat = decay<double>(fs.saturation(FluidSystem::waterPhaseIdx));
+
+        // Water saturation at the end of the transport substep, from the same linear change of the
+        // water volume over the time step as in the transport
+        if (!initial_equil) {
+            const Scalar volumeSubstep = vol1_[I] + substepFraction * (volumeNew_[I] - vol1_[I]);
+            swat *= volumeSubstep / volumeNew_[I];
+        }
+
+        // Minimum water saturation in the initial equilibrium, so that the surface loading does not
+        // depend on small saturations. The minerals change only with the water in the cell.
+        const double swatMineral = swat;
+        if (initial_equil) {
+            swat = std::max<double>(swat, minSatInitial);
+        }
         std::vector<double> Ctot;
         std::vector<double> Cads;
         const auto nAqu = geoChemInterface_->numberOfAqueousBasisSpecies();
@@ -1075,8 +1097,9 @@ protected:
         Ctot.resize(nBasis, 0.0);
         Cads.resize(nBasis, 0.0);
         for (std::size_t k = 0; k < nAqu; ++k) {
+            // Scale with water saturation, similar to ion exchangers
             if (!initial_equil) {
-                Cads[k] = Cads_[k][I];
+                Cads[k] = Cads_[k][I] / swat;
             }
             Ctot[k] = initial_equil ?
                 concentrationInitial_[k][I] : concentration_[k][I];
@@ -1091,8 +1114,6 @@ protected:
         double* log_Amin_ptr = nullptr;
         double* Cmin_ptr = nullptr;
         std::vector<double> Cmin;
-        const auto& intQuants = simulator_.model().intensiveQuantities(I, 0);
-        const auto& fs = intQuants.fluidState();
         const auto poro = decay<double>(intQuants.porosity());
         if (nMin > 0) {
             // Initial equilibrium solve requires calculation of initial mineral concentration
@@ -1117,12 +1138,16 @@ protected:
             log_Amin_ptr = geoChemInterface_->get_log_a_mineral().data();
         }
 
+        // No need for equilibrium solve in dry cells
+        if (swat < tolSat) {
+            return;
+        }
+
         // Fluid properties
         const auto temp = decay<double>(fs.temperature(0));
         const auto pres = decay<double>(fs.pressure(waterPhaseIdx));
 
-        // Phase saturations
-        const double swat = decay<double>(fs.saturation(FluidSystem::waterPhaseIdx));
+        // Oil and gas saturations
         double soil = 0.0;
         double sgas = 0.0;
         if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx)) {
@@ -1176,10 +1201,11 @@ protected:
                                        sigma,
                                        psi);
 
-        // Update mineral concentrations
+        // Update mineral concentrations. The change is per water volume and Cmin_ is per pore
+        // volume, so scale with water saturation
         if (nMin > 0) {
             for (std::size_t l = 0; l < nMin; ++l) {
-                Cmin_[l][I] += Cmin[l];
+                Cmin_[l][I] += Cmin[l] * swatMineral;
             }
         }
 
@@ -1191,7 +1217,7 @@ protected:
         // Update species concentrations
         for (std::size_t k = 0; k < nAqu; ++k) {
             Ctot[k] -= Cads[k];
-            Cads_[k][I] = Cads[k];
+            Cads_[k][I] = Cads[k] * swat;
 
             if (initial_equil) {
                 concentrationInitial_[k][I] = Ctot[k];
