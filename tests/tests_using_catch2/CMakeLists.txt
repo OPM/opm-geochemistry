@@ -62,7 +62,7 @@ target_link_libraries(
     RunGeoChem
 )
 
-set_target_properties(catch2_tests PROPERTIES CXX_STANDARD 17)
+set_target_properties(catch2_tests PROPERTIES CXX_STANDARD ${GEOCHEM_CXX_STANDARD})
 
 target_include_directories(catch2_tests
                            PRIVATE

@@ -19,12 +19,17 @@
 #ifndef FLOW_PROBLEM_GEOCHEMISTRY_HPP
 #define FLOW_PROBLEM_GEOCHEMISTRY_HPP
 
+#include <opm/common/OpmLog/OpmLog.hpp>
+
 #include <opm/models/io/vtkgeochemistrymodule.hpp>
 #include <opm/models/io/vtkgeochemistryparams.hpp>
 
 #include <opm/simulators/flow/FlowProblemBlackoil.hpp>
 #include <opm/simulators/flow/GeochemistryModel.hpp>
 
+#include <memory>
+#include <stdexcept>
+#include <string>
 
 namespace Opm {
 
@@ -37,17 +42,40 @@ public:
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
     using GeochemModel = GeochemistryModel<TypeTag>;
 
+    enum { enableGeochem = getPropValue<TypeTag, Properties::EnableGeochemistry>() };
+
     /*!
     * \brief Constructor
     *
     * \param simulator Reference to simulator object
     */
-    FlowProblemGeochemistry(Simulator& simulator)
+    explicit FlowProblemGeochemistry(Simulator& simulator)
         : Parent(simulator)
         , geochemistryModel_(simulator)
     {
-        // Add VTK module
-        this->model().addOutputModule(std::make_unique<VtkGeochemistryModule<TypeTag>>(simulator));
+        const bool deckHasGeochem = simulator.vanguard().eclState().runspec().geochem().enabled();
+        if constexpr (enableGeochem) {
+            // Add VTK module
+            this->model().addOutputModule(
+                std::make_unique<VtkGeochemistryModule<TypeTag>>(simulator));
+
+            // Sanity check
+            if (!deckHasGeochem) {
+                const std::string msg
+                    = "Simulator with geochemistry enabled compile time, but deck "
+                      "does not contain GEOCHEM keyword!";
+                OpmLog::error(msg);
+                throw std::runtime_error(msg);
+            }
+        } else {
+            // Sanity check
+            if (deckHasGeochem) {
+                const std::string msg
+                    = "GEOCHEM keyword in deck, but geochemistry disabled compile-time!";
+                OpmLog::error(msg);
+                throw std::runtime_error(msg);
+            }
+        }
     }
 
     /*!
@@ -56,6 +84,7 @@ public:
     static void registerParameters()
     {
         Parent::registerParameters();
+        GeochemModel::registerParameters();
         VtkGeochemistryParams::registerParameters();
     }
 
@@ -82,8 +111,10 @@ public:
     */
     void endTimeStep()
     {
-        Parent::endTimeStep();
+        // Must come before Parent::endTimeStep(), which evaluates the summary state. Otherwise the
+        // species rates in the summary lag one time step behind.
         geochemistryModel_.endTimeStep();
+        Parent::endTimeStep();
     }
 
     /*!
